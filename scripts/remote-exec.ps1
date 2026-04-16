@@ -1,0 +1,363 @@
+[CmdletBinding()]
+param(
+    [string]$HostName,
+
+    [string]$CommandText,
+
+    [string]$UserName,
+
+    [string]$Port,
+
+    [string]$AuthMode = "ssh-alias",
+
+    [string]$IdentityFile,
+
+    [string]$RemoteDir,
+
+    [string]$Risk = "auto",
+
+    [string]$ConfirmationState = "none",
+
+    [string]$PasswordEnv = "SSH_PASSWORD",
+
+    [string]$Timeout = "15",
+
+    [switch]$Help
+)
+
+function Write-Status {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+    Write-Output ("{0}: {1}" -f $Name, $Value)
+}
+
+function Show-Usage {
+    @"
+remote-exec.ps1
+
+Required:
+  --host VALUE
+  --command VALUE
+
+Optional:
+  --user VALUE
+  --port VALUE
+  --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
+  --identity-file VALUE
+  --remote-dir VALUE
+  --risk auto|low|high
+  --confirmation-state pending|confirmed|none
+  --password-env VALUE
+  --timeout VALUE
+"@
+}
+
+if ($Help) {
+    Show-Usage
+    exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($HostName) -or [string]::IsNullOrWhiteSpace($CommandText)) {
+    Show-Usage
+    exit 2
+}
+
+$target = if ($HostName -notmatch "@" -and $UserName) { "{0}@{1}" -f $UserName, $HostName } else { $HostName }
+
+function Test-HighRiskCommand {
+    param([string]$CommandText)
+
+    $patterns = @(
+        '(^|[\s;|&])(rm|chmod|chown|chgrp|kill|pkill)([\s]|$)',
+        'systemctl\s+(restart|stop)',
+        'service\s+.+\s+restart',
+        'git\s+push',
+        'git\s+reset\s+--hard',
+        'git\s+clean\s+-fd',
+        'sudo\s',
+        'dd\s',
+        'mkfs',
+        'fdisk',
+        'parted',
+        'iptables',
+        'nft',
+        'crontab\s+-r',
+        '(^|[^>])>>?\s*(/etc|/usr|/bin|/sbin|/opt|/var/www)',
+        '(^|[\s;|&])(bash|sh|python|python3)\s+\S+'
+    )
+    foreach ($pattern in $patterns) {
+        if ($CommandText -match $pattern) {
+            return $true
+        }
+    }
+    if ($CommandText -match 'curl' -and $CommandText -match '\|\s*bash') {
+        return $true
+    }
+    if ($CommandText -match 'wget' -and $CommandText -match '\|\s*bash') {
+        return $true
+    }
+    return $false
+}
+
+if ($Risk -eq "auto") {
+    $Risk = if (Test-HighRiskCommand -CommandText $CommandText) { "high" } else { "low" }
+}
+
+if ($Risk -eq "high" -and $ConfirmationState -ne "confirmed") {
+    Write-Status "STATUS" "pending_confirmation"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" "high"
+    Write-Status "REASON" "command is classified as high risk"
+    Write-Status "NEXT" "obtain explicit human confirmation and rerun with --confirmation-state confirmed"
+    Write-Output ("COMMAND: {0}" -f $CommandText)
+    exit 3
+}
+
+$sshCommand = Get-Command ssh -ErrorAction SilentlyContinue
+if (-not $sshCommand) {
+    Write-Status "STATUS" "auth_tool_unavailable"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "ssh command is not available"
+    Write-Status "NEXT" "install OpenSSH client"
+    exit 4
+}
+
+switch ($AuthMode) {
+    "ssh-alias" { }
+    "identity-file" {
+        if (-not $IdentityFile -or -not (Test-Path $IdentityFile)) {
+            Write-Status "STATUS" "missing_key"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" "explicit identity file was required but not found"
+            Write-Status "NEXT" "provide a valid --identity-file"
+            exit 5
+        }
+    }
+    "default-key-discovery" {
+        $home = [Environment]::GetFolderPath("UserProfile")
+        $candidates = @(
+            (Join-Path $home ".ssh\id_ed25519"),
+            (Join-Path $home ".ssh\id_ecdsa"),
+            (Join-Path $home ".ssh\id_rsa")
+        ) | Where-Object { Test-Path $_ }
+
+        if (-not $candidates) {
+            Write-Status "STATUS" "missing_key"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" "no default private key was found"
+            Write-Status "NEXT" "generate a key or choose a different auth mode"
+            exit 5
+        }
+        if ($candidates.Count -gt 1) {
+            Write-Status "STATUS" "key_ambiguous"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" "multiple default private keys were found"
+            Write-Status "NEXT" "choose one key explicitly with --identity-file"
+            Write-Output "CANDIDATE_KEYS:"
+            $candidates
+            exit 6
+        }
+        $IdentityFile = $candidates[0]
+    }
+    "ssh-agent" {
+        $sshAdd = Get-Command ssh-add -ErrorAction SilentlyContinue
+        if (-not $sshAdd) {
+            Write-Status "STATUS" "auth_tool_unavailable"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" "ssh-add is not available"
+            Write-Status "NEXT" "use a file-based auth mode"
+            exit 4
+        }
+        $agentOutput = & ssh-add -l 2>&1
+        $agentText = ($agentOutput | Out-String)
+        if ($agentText -match "The agent has no identities") {
+            Write-Status "STATUS" "missing_key"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" "ssh-agent has no identities"
+            Write-Status "NEXT" "add a key or use another auth mode"
+            exit 5
+        }
+        $identityCount = ($agentOutput | Where-Object { $_ -match '^\d+' }).Count
+        if ($identityCount -gt 1) {
+            Write-Status "STATUS" "key_ambiguous"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" "ssh-agent contains multiple identities"
+            Write-Status "NEXT" "choose an explicit identity file or narrow the agent state"
+            Write-Output "AGENT_IDENTITIES:"
+            $agentOutput
+            exit 6
+        }
+    }
+    "password" { }
+    default {
+        Write-Status "STATUS" "invalid_arguments"
+        Write-Status "HOST" $target
+        Write-Status "ACTION" "remote_exec"
+        Write-Status "AUTH_MODE" $AuthMode
+        Write-Status "RISK" $Risk
+        Write-Status "REASON" "unsupported auth mode"
+        Write-Status "NEXT" "choose a supported auth mode"
+        exit 2
+    }
+}
+
+$remoteCommand = if ($RemoteDir) { "cd '{0}' && {1}" -f ($RemoteDir -replace "'", "'\''"), $CommandText } else { $CommandText }
+
+$sshArgs = @("-o", "ConnectTimeout=$Timeout")
+if ($Port) {
+    $sshArgs += @("-p", $Port)
+}
+if ($IdentityFile) {
+    $sshArgs += @("-i", $IdentityFile, "-o", "IdentitiesOnly=yes")
+}
+if ($AuthMode -eq "password") {
+    $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+} else {
+    $sshArgs += @("-o", "BatchMode=yes")
+}
+$sshArgs += @($target, $remoteCommand)
+
+function Invoke-ProcessCapture {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [hashtable]$EnvironmentTable
+    )
+
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $previous = @{}
+    try {
+        if ($EnvironmentTable) {
+            foreach ($key in $EnvironmentTable.Keys) {
+                $previous[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+                [Environment]::SetEnvironmentVariable($key, $EnvironmentTable[$key], "Process")
+            }
+        }
+        $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        return @{
+            ExitCode = $process.ExitCode
+            StdOut = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
+            StdErr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+        }
+    } finally {
+        foreach ($key in $previous.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $previous[$key], "Process")
+        }
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$envTable = @{}
+$askPassPath = $null
+try {
+    if ($AuthMode -eq "password") {
+        $passwordValue = [Environment]::GetEnvironmentVariable($PasswordEnv, "Process")
+        if ([string]::IsNullOrWhiteSpace($passwordValue)) {
+            Write-Status "STATUS" "interactive_password_required"
+            Write-Status "HOST" $target
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "AUTH_MODE" $AuthMode
+            Write-Status "RISK" $Risk
+            Write-Status "REASON" ("password auth requires a named environment variable such as {0}" -f $PasswordEnv)
+            Write-Status "NEXT" "set the password environment variable and rerun"
+            exit 7
+        }
+
+        $askPassPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".cmd")
+        Set-Content -LiteralPath $askPassPath -Encoding ASCII -Value "@echo off`r`necho %SSH_LINUX_ASKPASS_SECRET%`r`n"
+        $envTable = @{
+            SSH_LINUX_ASKPASS_SECRET = $passwordValue
+            SSH_ASKPASS = $askPassPath
+            SSH_ASKPASS_REQUIRE = "force"
+            DISPLAY = "codex-ssh-linux"
+        }
+    }
+
+    $result = Invoke-ProcessCapture -FilePath $sshCommand.Source -ArgumentList $sshArgs -EnvironmentTable $envTable
+} finally {
+    if ($askPassPath) {
+        Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if ($result.ExitCode -eq 0) {
+    Write-Status "STATUS" "ok"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "remote command executed successfully"
+    Write-Status "NEXT" "none"
+    if ($result.StdOut) {
+        Write-Output "OUTPUT:"
+        Write-Output $result.StdOut.TrimEnd()
+    }
+    if ($result.StdErr) {
+        Write-Output "STDERR:"
+        Write-Output $result.StdErr.TrimEnd()
+    }
+    exit 0
+}
+
+$stderrText = $result.StdErr
+if ($stderrText -match 'permission denied|authentication failed') {
+    Write-Status "STATUS" "auth_failed"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "ssh authentication failed"
+    Write-Status "NEXT" "check auth mode, identity, agent, or password environment"
+} elseif ($stderrText -match 'could not resolve hostname|connection timed out|no route to host|connection refused|name or service not known') {
+    Write-Status "STATUS" "connect_failed"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "ssh connection failed"
+    Write-Status "NEXT" "check host, port, network reachability, and SSH service availability"
+} else {
+    Write-Status "STATUS" "command_failed"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "remote command returned a non-zero status"
+    Write-Status "NEXT" "inspect STDERR and remote state"
+}
+
+if ($result.StdOut) {
+    Write-Output "OUTPUT:"
+    Write-Output $result.StdOut.TrimEnd()
+}
+if ($result.StdErr) {
+    Write-Output "STDERR:"
+    Write-Output $result.StdErr.TrimEnd()
+}
+exit $result.ExitCode

@@ -1,0 +1,7 @@
+interface:
+  display_name: "SSH Linux"
+  short_description: "Remote Linux operations over SSH"
+  default_prompt: "Use $ssh-linux to connect to a Linux server over SSH, choose authentication safely, and run remote commands or transfer files."
+
+policy:
+  allow_implicit_invocation: true
