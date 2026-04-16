@@ -4,6 +4,8 @@ param(
 
     [string]$CommandText,
 
+    [string]$CommandFile,
+
     [string]$UserName,
 
     [string]$Port,
@@ -11,6 +13,8 @@ param(
     [string]$AuthMode = "ssh-alias",
 
     [string]$IdentityFile,
+
+    [string]$KnownHostsFile,
 
     [string]$RemoteDir,
 
@@ -26,6 +30,7 @@ param(
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
+. (Join-Path $PSScriptRoot "process-utils.ps1")
 
 function Write-Status {
     param(
@@ -41,13 +46,15 @@ remote-exec.ps1
 
 Required:
   --host VALUE
-  --command VALUE
+  --command VALUE | --command-file VALUE
 
 Optional:
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
   --identity-file VALUE
+  --known-hosts-file VALUE
+  --command-file VALUE
   --remote-dir VALUE
   --risk auto|low|high
   --confirmation-state pending|confirmed|none
@@ -59,6 +66,26 @@ Optional:
 if ($Help) {
     Show-Usage
     exit 0
+}
+
+if (-not [string]::IsNullOrWhiteSpace($CommandText) -and -not [string]::IsNullOrWhiteSpace($CommandFile)) {
+    Write-Status "STATUS" "invalid_arguments"
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "REASON" "provide either --command or --command-file, not both"
+    Write-Status "NEXT" "choose one command input mode and rerun"
+    exit 2
+}
+
+if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
+    if (-not (Test-Path -LiteralPath $CommandFile)) {
+        Write-Status "STATUS" "missing_command_file"
+        Write-Status "ACTION" "remote_exec"
+        Write-Status "REASON" "command file was not found"
+        Write-Status "NEXT" "provide a valid --command-file"
+        Write-Output ("COMMAND_FILE: {0}" -f $CommandFile)
+        exit 4
+    }
+    $CommandText = Read-TextFileAuto -LiteralPath $CommandFile
 }
 
 if ([string]::IsNullOrWhiteSpace($HostName) -or [string]::IsNullOrWhiteSpace($CommandText)) {
@@ -134,7 +161,7 @@ if ($toolchain.backend -eq "none") {
 switch ($AuthMode) {
     "ssh-alias" { }
     "identity-file" {
-        if (-not $IdentityFile -or -not (Test-Path $IdentityFile)) {
+        if (-not $IdentityFile -or -not (Test-Path -LiteralPath $IdentityFile)) {
             Write-Status "STATUS" "missing_key"
             Write-Status "HOST" $target
             Write-Status "ACTION" "remote_exec"
@@ -227,7 +254,20 @@ switch ($AuthMode) {
     }
 }
 
-$remoteCommand = if ($RemoteDir) { "cd '{0}' && {1}" -f ($RemoteDir -replace "'", "'\''"), $CommandText } else { $CommandText }
+$resolvedKnownHostsFile = Resolve-KnownHostsFile -KnownHostsFile $KnownHostsFile
+if (-not [string]::IsNullOrWhiteSpace($resolvedKnownHostsFile) -and -not (Test-Path -LiteralPath $resolvedKnownHostsFile)) {
+    Write-Status "STATUS" "missing_known_hosts"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "known_hosts file was not found"
+    Write-Status "NEXT" "provide a valid --known-hosts-file or accept the host key once outside the sandbox"
+    Write-Output ("KNOWN_HOSTS_FILE: {0}" -f $resolvedKnownHostsFile)
+    exit 5
+}
+
+$remoteCommand = if ($RemoteDir) { "cd {0} && {1}" -f (ConvertTo-PosixSingleQuotedString -Value $RemoteDir), $CommandText } else { $CommandText }
 
 $sshArgs = @()
 $sshProgram = ""
@@ -251,6 +291,9 @@ if ($IdentityFile) {
         $sshArgs += @("-o", "IdentitiesOnly=yes")
     }
 }
+if ($resolvedKnownHostsFile -and $toolchain.backend -eq "openssh") {
+    $sshArgs += @("-o", "UserKnownHostsFile=$resolvedKnownHostsFile")
+}
 if ($AuthMode -eq "password") {
     if ($toolchain.backend -eq "openssh") {
         $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
@@ -270,37 +313,6 @@ if ($AuthMode -eq "password") {
     }
 }
 $sshArgs += @($target, $remoteCommand)
-
-function Invoke-ProcessCapture {
-    param(
-        [string]$FilePath,
-        [string[]]$ArgumentList,
-        [hashtable]$EnvironmentTable
-    )
-
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
-    $previous = @{}
-    try {
-        if ($EnvironmentTable) {
-            foreach ($key in $EnvironmentTable.Keys) {
-                $previous[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-                [Environment]::SetEnvironmentVariable($key, $EnvironmentTable[$key], "Process")
-            }
-        }
-        $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-        return @{
-            ExitCode = $process.ExitCode
-            StdOut = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-            StdErr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
-        }
-    } finally {
-        foreach ($key in $previous.Keys) {
-            [Environment]::SetEnvironmentVariable($key, $previous[$key], "Process")
-        }
-        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
-    }
-}
 
 $envTable = @{}
 $askPassPath = $null
@@ -328,7 +340,7 @@ try {
         }
     }
 
-    $result = Invoke-ProcessCapture -FilePath $sshProgram -ArgumentList $sshArgs -EnvironmentTable $envTable
+    $result = Invoke-NativeProcessCapture -FilePath $sshProgram -ArgumentList $sshArgs -EnvironmentTable $envTable
 } finally {
     if ($askPassPath) {
         Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue

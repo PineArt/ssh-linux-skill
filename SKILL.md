@@ -49,6 +49,7 @@ Prefer this skill when the user asks to:
 6. Use the Bash or PowerShell script that matches the local environment, but keep the same conceptual arguments and status labels.
 7. Use [references/tool-fallbacks.md](references/tool-fallbacks.md) when the remote host lacks preferred tools.
 8. Never store secrets in the repository or echo passwords into shell history.
+9. For complex remote commands with quotes, semicolons, pipes, or multiple lines, prefer `remote-exec --command-file` so the local shell does not re-parse the command text.
 
 ## Responsibility Split
 
@@ -87,6 +88,7 @@ All entry points align on these conceptual fields:
 - optional port
 - auth mode
 - optional identity file
+- optional known-hosts file
 - optional remote working directory
 - command or transfer source and target
 - optional password environment variable name

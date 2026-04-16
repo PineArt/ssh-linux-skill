@@ -22,6 +22,7 @@ Optional:
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
   --identity-file VALUE
+  --known-hosts-file VALUE
   --risk auto|low|high
   --confirmation-state pending|confirmed|none
   --password-env VALUE
@@ -38,6 +39,7 @@ user_name=""
 port=""
 auth_mode="ssh-alias"
 identity_file=""
+known_hosts_file=""
 risk="auto"
 confirmation_state="none"
 password_env="SSH_PASSWORD"
@@ -76,6 +78,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --identity-file)
       identity_file="${2:-}"
+      shift 2
+      ;;
+    --known-hosts-file)
+      known_hosts_file="${2:-}"
       shift 2
       ;;
     --risk)
@@ -323,6 +329,22 @@ case "$auth_mode" in
     ;;
 esac
 
+if [[ -z "$known_hosts_file" && -f "${HOME:-}/.ssh/known_hosts" ]]; then
+  known_hosts_file="${HOME}/.ssh/known_hosts"
+fi
+
+if [[ -n "$known_hosts_file" && ! -f "$known_hosts_file" ]]; then
+  status STATUS missing_known_hosts
+  status HOST "$target"
+  status ACTION remote_copy
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "known_hosts file was not found"
+  status NEXT "provide a valid --known-hosts-file or accept the host key once outside the sandbox"
+  printf 'KNOWN_HOSTS_FILE: %s\n' "$known_hosts_file"
+  exit 5
+fi
+
 ssh_args=()
 copy_args=()
 ssh_program=""
@@ -354,6 +376,10 @@ if [[ -n "$identity_file" ]]; then
     ssh_args+=(-o "IdentitiesOnly=yes")
     copy_args+=(-o "IdentitiesOnly=yes")
   fi
+fi
+if [[ -n "$known_hosts_file" && "$ssh_toolchain_backend" == "openssh" ]]; then
+  ssh_args+=(-o "UserKnownHostsFile=$known_hosts_file")
+  copy_args+=(-o "UserKnownHostsFile=$known_hosts_file")
 fi
 if [[ "$auth_mode" == "password" ]]; then
   if [[ "$ssh_toolchain_backend" != "openssh" ]]; then

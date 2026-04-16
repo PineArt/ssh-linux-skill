@@ -29,6 +29,7 @@ function Find-ExecutableCandidates {
     )
 
     $candidates = @()
+    $candidates += $KnownPaths
 
     $command = Get-Command $Name -ErrorAction SilentlyContinue
     if ($command -and $command.Source) {
@@ -46,7 +47,6 @@ function Find-ExecutableCandidates {
         }
     }
 
-    $candidates += $KnownPaths
     Get-UniqueExistingPaths -Candidates $candidates
 }
 
@@ -125,4 +125,3 @@ function Get-SshToolchain {
         pscp_candidates = $pscpCandidates
     }
 }
-

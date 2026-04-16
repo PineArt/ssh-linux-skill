@@ -21,6 +21,8 @@ Use when the user provides an alias from their SSH config. Do not override alias
 
 Use when the user explicitly gives a private key path.
 
+When the local runtime is sandboxed or home-directory remapping affects host key verification, pass an explicit known-hosts path with `--known-hosts-file`.
+
 ### `default-key-discovery`
 
 Probe standard keys in a fixed order:

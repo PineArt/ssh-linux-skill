@@ -16,6 +16,8 @@ param(
 
     [string]$IdentityFile,
 
+    [string]$KnownHostsFile,
+
     [string]$Risk = "auto",
 
     [string]$ConfirmationState = "none",
@@ -30,6 +32,7 @@ param(
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
+. (Join-Path $PSScriptRoot "process-utils.ps1")
 
 function Write-Status {
     param(
@@ -54,6 +57,7 @@ Optional:
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
   --identity-file VALUE
+  --known-hosts-file VALUE
   --risk auto|low|high
   --confirmation-state pending|confirmed|none
   --password-env VALUE
@@ -136,7 +140,7 @@ if ($Risk -eq "high" -and $ConfirmationState -ne "confirmed") {
     exit 3
 }
 
-if ($Direction -eq "upload" -and -not (Test-Path $SourcePath)) {
+if ($Direction -eq "upload" -and -not (Test-Path -LiteralPath $SourcePath)) {
     Write-Status "STATUS" "missing_source"
     Write-Status "HOST" $target
     Write-Status "ACTION" "remote_copy"
@@ -184,7 +188,7 @@ if ($toolchain.backend -eq "putty" -and [string]::IsNullOrWhiteSpace($toolchain.
 switch ($AuthMode) {
     "ssh-alias" { }
     "identity-file" {
-        if (-not $IdentityFile -or -not (Test-Path $IdentityFile)) {
+        if (-not $IdentityFile -or -not (Test-Path -LiteralPath $IdentityFile)) {
             Write-Status "STATUS" "missing_key"
             Write-Status "HOST" $target
             Write-Status "ACTION" "remote_copy"
@@ -276,6 +280,19 @@ switch ($AuthMode) {
     }
 }
 
+$resolvedKnownHostsFile = Resolve-KnownHostsFile -KnownHostsFile $KnownHostsFile
+if (-not [string]::IsNullOrWhiteSpace($resolvedKnownHostsFile) -and -not (Test-Path -LiteralPath $resolvedKnownHostsFile)) {
+    Write-Status "STATUS" "missing_known_hosts"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_copy"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "known_hosts file was not found"
+    Write-Status "NEXT" "provide a valid --known-hosts-file or accept the host key once outside the sandbox"
+    Write-Output ("KNOWN_HOSTS_FILE: {0}" -f $resolvedKnownHostsFile)
+    exit 5
+}
+
 $sshArgs = @()
 $copyArgs = @()
 $sshProgram = ""
@@ -308,6 +325,10 @@ if ($IdentityFile) {
         $copyArgs += @("-o", "IdentitiesOnly=yes")
     }
 }
+if ($resolvedKnownHostsFile -and $toolchain.backend -eq "openssh") {
+    $sshArgs += @("-o", "UserKnownHostsFile=$resolvedKnownHostsFile")
+    $copyArgs += @("-o", "UserKnownHostsFile=$resolvedKnownHostsFile")
+}
 if ($AuthMode -eq "password") {
     if ($toolchain.backend -eq "openssh") {
         $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
@@ -330,37 +351,6 @@ if ($AuthMode -eq "password") {
 }
 if ($Recursive) {
     $copyArgs += "-r"
-}
-
-function Invoke-ProcessCapture {
-    param(
-        [string]$FilePath,
-        [string[]]$ArgumentList,
-        [hashtable]$EnvironmentTable
-    )
-
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
-    $previous = @{}
-    try {
-        if ($EnvironmentTable) {
-            foreach ($key in $EnvironmentTable.Keys) {
-                $previous[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-                [Environment]::SetEnvironmentVariable($key, $EnvironmentTable[$key], "Process")
-            }
-        }
-        $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-        return @{
-            ExitCode = $process.ExitCode
-            StdOut = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-            StdErr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
-        }
-    } finally {
-        foreach ($key in $previous.Keys) {
-            [Environment]::SetEnvironmentVariable($key, $previous[$key], "Process")
-        }
-        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
-    }
 }
 
 $envTable = @{}
@@ -390,8 +380,9 @@ try {
     }
 
     if ($Direction -eq "upload" -and $ConfirmationState -ne "confirmed") {
-        $precheckArgs = @($sshArgs + @($target, "test -e '$($TargetPath)'"))
-        $precheck = Invoke-ProcessCapture -FilePath $sshProgram -ArgumentList $precheckArgs -EnvironmentTable $envTable
+        $precheckTarget = ConvertTo-PosixSingleQuotedString -Value $TargetPath
+        $precheckArgs = @($sshArgs + @($target, "test -e $precheckTarget"))
+        $precheck = Invoke-NativeProcessCapture -FilePath $sshProgram -ArgumentList $precheckArgs -EnvironmentTable $envTable
         if ($precheck.ExitCode -eq 0) {
             Write-Status "STATUS" "pending_confirmation"
             Write-Status "HOST" $target
@@ -415,7 +406,7 @@ try {
         $scpArgList += @($remoteSource, $TargetPath)
     }
 
-    $result = Invoke-ProcessCapture -FilePath $copyProgram -ArgumentList $scpArgList -EnvironmentTable $envTable
+    $result = Invoke-NativeProcessCapture -FilePath $copyProgram -ArgumentList $scpArgList -EnvironmentTable $envTable
 } finally {
     if ($askPassPath) {
         Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue

@@ -13,13 +13,15 @@ remote-exec.sh
 
 Required:
   --host VALUE
-  --command VALUE
+  --command VALUE | --command-file VALUE
 
 Optional:
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
   --identity-file VALUE
+  --known-hosts-file VALUE
+  --command-file VALUE
   --remote-dir VALUE
   --risk auto|low|high
   --confirmation-state pending|confirmed|none
@@ -30,10 +32,12 @@ EOF
 
 host=""
 command_text=""
+command_file=""
 user_name=""
 port=""
 auth_mode="ssh-alias"
 identity_file=""
+known_hosts_file=""
 remote_dir=""
 risk="auto"
 confirmation_state="none"
@@ -50,6 +54,10 @@ while [[ $# -gt 0 ]]; do
       command_text="${2:-}"
       shift 2
       ;;
+    --command-file)
+      command_file="${2:-}"
+      shift 2
+      ;;
     --user)
       user_name="${2:-}"
       shift 2
@@ -64,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --identity-file)
       identity_file="${2:-}"
+      shift 2
+      ;;
+    --known-hosts-file)
+      known_hosts_file="${2:-}"
       shift 2
       ;;
     --remote-dir)
@@ -99,6 +111,26 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$command_text" && -n "$command_file" ]]; then
+  status STATUS invalid_arguments
+  status ACTION remote_exec
+  status REASON "provide either --command or --command-file, not both"
+  status NEXT "choose one command input mode and rerun"
+  exit 2
+fi
+
+if [[ -n "$command_file" ]]; then
+  if [[ ! -f "$command_file" ]]; then
+    status STATUS missing_command_file
+    status ACTION remote_exec
+    status REASON "command file was not found"
+    status NEXT "provide a valid --command-file"
+    printf 'COMMAND_FILE: %s\n' "$command_file"
+    exit 4
+  fi
+  command_text="$(<"$command_file")"
+fi
 
 if [[ -z "$host" || -z "$command_text" ]]; then
   usage
@@ -258,6 +290,22 @@ case "$auth_mode" in
     ;;
 esac
 
+if [[ -z "$known_hosts_file" && -f "${HOME:-}/.ssh/known_hosts" ]]; then
+  known_hosts_file="${HOME}/.ssh/known_hosts"
+fi
+
+if [[ -n "$known_hosts_file" && ! -f "$known_hosts_file" ]]; then
+  status STATUS missing_known_hosts
+  status HOST "$target"
+  status ACTION remote_exec
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "known_hosts file was not found"
+  status NEXT "provide a valid --known-hosts-file or accept the host key once outside the sandbox"
+  printf 'KNOWN_HOSTS_FILE: %s\n' "$known_hosts_file"
+  exit 5
+fi
+
 escaped_dir="${remote_dir//\'/\'\\\'\'}"
 remote_command="$command_text"
 if [[ -n "$remote_dir" ]]; then
@@ -285,6 +333,9 @@ if [[ -n "$identity_file" ]]; then
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
     ssh_args+=(-o "IdentitiesOnly=yes")
   fi
+fi
+if [[ -n "$known_hosts_file" && "$ssh_toolchain_backend" == "openssh" ]]; then
+  ssh_args+=(-o "UserKnownHostsFile=$known_hosts_file")
 fi
 if [[ "$auth_mode" == "password" ]]; then
   if [[ "$ssh_toolchain_backend" != "openssh" ]]; then

@@ -28,6 +28,7 @@ Scan the full requested command string, not only the first token. Include:
 - `&&`, `||`, and `;`,
 - heredocs,
 - shell wrappers such as `bash script.sh` or `python script.py`.
+- full command-file contents when the command is supplied indirectly from a local file.
 
 Document variable-expansion evasion as a residual risk. If a command hides dangerous behavior behind variables or opaque scripts, classify it conservatively.
 
