@@ -13,6 +13,8 @@ param(
     [switch]$Help
 )
 
+. (Join-Path $PSScriptRoot "ssh-tools.ps1")
+
 function Write-Status {
     param(
         [string]$Name,
@@ -73,15 +75,15 @@ switch ($Action) {
         $keys
     }
     "agent" {
-        $sshAdd = Get-Command ssh-add -ErrorAction SilentlyContinue
-        if (-not $sshAdd) {
+        $toolchain = Get-SshToolchain
+        if ($toolchain.backend -ne "openssh" -or [string]::IsNullOrWhiteSpace($toolchain.ssh_add)) {
             Write-Status "STATUS" "auth_tool_unavailable"
             Write-Status "ACTION" "auth_setup"
-            Write-Status "REASON" "ssh-add is not available"
+            Write-Status "REASON" "ssh-add is not available from a detected OpenSSH toolchain"
             Write-Status "NEXT" "use explicit key files instead"
             exit 4
         }
-        $output = & ssh-add -l 2>&1
+        $output = & $toolchain.ssh_add -l 2>&1
         if ($LASTEXITCODE -ne 0 -and ($output -join "`n") -match "The agent has no identities") {
             Write-Status "STATUS" "no_agent_keys"
             Write-Status "ACTION" "auth_setup"
@@ -97,6 +99,14 @@ switch ($Action) {
         $output
     }
     "generate" {
+        $toolchain = Get-SshToolchain
+        if ($toolchain.backend -ne "openssh" -or [string]::IsNullOrWhiteSpace($toolchain.ssh_keygen)) {
+            Write-Status "STATUS" "auth_tool_unavailable"
+            Write-Status "ACTION" "auth_setup"
+            Write-Status "REASON" "ssh-keygen is not available from a detected OpenSSH toolchain"
+            Write-Status "NEXT" "install OpenSSH or Git for Windows OpenSSH tools"
+            exit 4
+        }
         $userHome = [Environment]::GetFolderPath("UserProfile")
         $keyPath = if ($KeyPath) { $KeyPath } else { Join-Path $userHome ".ssh\id_ed25519" }
         $dir = Split-Path -Parent $keyPath
@@ -122,7 +132,7 @@ switch ($Action) {
             exit 3
         }
 
-        & ssh-keygen -t $KeyType -f $keyPath -N "" -C $Comment | Out-Null
+        & $toolchain.ssh_keygen -t $KeyType -f $keyPath -N "" -C $Comment | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Status "STATUS" "auth_setup_failed"
             Write-Status "ACTION" "auth_setup"

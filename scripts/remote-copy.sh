@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ssh-tools.sh"
+
 status() {
   printf '%s: %s\n' "$1" "$2"
 }
@@ -194,14 +196,37 @@ if [[ "$direction" == "upload" && ! -e "$source_path" ]]; then
   exit 4
 fi
 
-if ! command -v ssh >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then
+load_ssh_toolchain || true
+if [[ "$ssh_toolchain_backend" == "none" ]]; then
   status STATUS auth_tool_unavailable
   status HOST "$target"
   status ACTION remote_copy
   status AUTH_MODE "$auth_mode"
   status RISK "$risk"
-  status REASON "ssh or scp command is not available"
-  status NEXT "install OpenSSH client tools"
+  status REASON "no supported SSH or copy backend was found"
+  status NEXT "install OpenSSH or PuTTY tools and ensure they are discoverable"
+  exit 4
+fi
+
+if [[ "$ssh_toolchain_backend" == "openssh" && -z "$scp_tool" ]]; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_copy
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "OpenSSH was found but scp is unavailable"
+  status NEXT "install OpenSSH scp or add it to PATH"
+  exit 4
+fi
+
+if [[ "$ssh_toolchain_backend" == "putty" && -z "$pscp_tool" ]]; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_copy
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "PuTTY plink was found but pscp is unavailable"
+  status NEXT "install PuTTY pscp or use OpenSSH tools"
   exit 4
 fi
 
@@ -250,17 +275,17 @@ case "$auth_mode" in
     identity_file="${candidates[0]}"
     ;;
   ssh-agent)
-    if ! command -v ssh-add >/dev/null 2>&1; then
+    if [[ "$ssh_toolchain_backend" != "openssh" || -z "$ssh_add_tool" ]]; then
       status STATUS auth_tool_unavailable
       status HOST "$target"
       status ACTION remote_copy
       status AUTH_MODE "$auth_mode"
       status RISK "$risk"
-      status REASON "ssh-add is not available"
-      status NEXT "use a file-based auth mode"
+      status REASON "ssh-agent support requires OpenSSH ssh-add"
+      status NEXT "use a file-based auth mode or install OpenSSH tools"
       exit 4
     fi
-    agent_output="$(ssh-add -l 2>&1 || true)"
+    agent_output="$("$ssh_add_tool" -l 2>&1 || true)"
     if [[ "$agent_output" == *"The agent has no identities."* ]]; then
       status STATUS missing_key
       status HOST "$target"
@@ -298,25 +323,59 @@ case "$auth_mode" in
     ;;
 esac
 
-ssh_args=(-o "ConnectTimeout=$timeout")
-scp_args=(-o "ConnectTimeout=$timeout")
+ssh_args=()
+copy_args=()
+ssh_program=""
+copy_program=""
+if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+  ssh_program="$ssh_tool"
+  copy_program="$scp_tool"
+  ssh_args+=(-o "ConnectTimeout=$timeout")
+  copy_args+=(-o "ConnectTimeout=$timeout")
+else
+  ssh_program="$plink_tool"
+  copy_program="$pscp_tool"
+  ssh_args+=(-batch)
+  copy_args+=(-batch)
+fi
 if [[ -n "$port" ]]; then
-  ssh_args+=(-p "$port")
-  scp_args+=(-P "$port")
+  if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+    ssh_args+=(-p "$port")
+    copy_args+=(-P "$port")
+  else
+    ssh_args+=(-P "$port")
+    copy_args+=(-P "$port")
+  fi
 fi
 if [[ -n "$identity_file" ]]; then
-  ssh_args+=(-i "$identity_file" -o "IdentitiesOnly=yes")
-  scp_args+=(-i "$identity_file" -o "IdentitiesOnly=yes")
+  ssh_args+=(-i "$identity_file")
+  copy_args+=(-i "$identity_file")
+  if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+    ssh_args+=(-o "IdentitiesOnly=yes")
+    copy_args+=(-o "IdentitiesOnly=yes")
+  fi
 fi
 if [[ "$auth_mode" == "password" ]]; then
+  if [[ "$ssh_toolchain_backend" != "openssh" ]]; then
+    status STATUS auth_mode_unsupported
+    status HOST "$target"
+    status ACTION remote_copy
+    status AUTH_MODE "$auth_mode"
+    status RISK "$risk"
+    status REASON "password automation is only implemented for OpenSSH"
+    status NEXT "use OpenSSH or a key-based auth mode"
+    exit 8
+  fi
   ssh_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
-  scp_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
+  copy_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
 else
-  ssh_args+=(-o "BatchMode=yes")
-  scp_args+=(-o "BatchMode=yes")
+  if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+    ssh_args+=(-o "BatchMode=yes")
+    copy_args+=(-o "BatchMode=yes")
+  fi
 fi
 if [[ "$recursive" == "true" ]]; then
-  scp_args+=(-r)
+  copy_args+=(-r)
 fi
 
 stdout_file="$(mktemp)"
@@ -333,7 +392,7 @@ maybe_precheck_remote_exists() {
     return 0
   fi
   set +e
-  ssh "${ssh_args[@]}" "$target" "test -e '$target_path'" >/dev/null 2>&1
+  "$ssh_program" "${ssh_args[@]}" "$target" "test -e '$target_path'" >/dev/null 2>&1
   local exists_code=$?
   set -e
   if [[ "$exists_code" -eq 0 ]]; then
@@ -373,15 +432,15 @@ printf '%s\n' "$SSH_LINUX_ASKPASS_SECRET"
 EOF
     chmod 700 "$askpass_file"
     if [[ "$direction" == "upload" ]]; then
-      env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" scp "${scp_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
+      env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" "$copy_program" "${copy_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
     else
-      env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" scp "${scp_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
+      env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" "$copy_program" "${copy_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
     fi
   else
     if [[ "$direction" == "upload" ]]; then
-      scp "${scp_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
+      "$copy_program" "${copy_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
     else
-      scp "${scp_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
+      "$copy_program" "${copy_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
     fi
   fi
 }

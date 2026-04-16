@@ -29,6 +29,8 @@ param(
     [switch]$Help
 )
 
+. (Join-Path $PSScriptRoot "ssh-tools.ps1")
+
 function Write-Status {
     param(
         [string]$Name,
@@ -145,16 +147,37 @@ if ($Direction -eq "upload" -and -not (Test-Path $SourcePath)) {
     exit 4
 }
 
-$sshCommand = Get-Command ssh -ErrorAction SilentlyContinue
-$scpCommand = Get-Command scp -ErrorAction SilentlyContinue
-if (-not $sshCommand -or -not $scpCommand) {
+$toolchain = Get-SshToolchain
+if ($toolchain.backend -eq "none") {
     Write-Status "STATUS" "auth_tool_unavailable"
     Write-Status "HOST" $target
     Write-Status "ACTION" "remote_copy"
     Write-Status "AUTH_MODE" $AuthMode
     Write-Status "RISK" $Risk
-    Write-Status "REASON" "ssh or scp command is not available"
-    Write-Status "NEXT" "install OpenSSH client tools"
+    Write-Status "REASON" "no supported SSH or copy backend was found"
+    Write-Status "NEXT" "install OpenSSH or PuTTY tools and ensure they are discoverable"
+    exit 4
+}
+
+if ($toolchain.backend -eq "openssh" -and [string]::IsNullOrWhiteSpace($toolchain.scp)) {
+    Write-Status "STATUS" "auth_tool_unavailable"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_copy"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "OpenSSH was found but scp is unavailable"
+    Write-Status "NEXT" "install OpenSSH scp or add it to PATH"
+    exit 4
+}
+
+if ($toolchain.backend -eq "putty" -and [string]::IsNullOrWhiteSpace($toolchain.pscp)) {
+    Write-Status "STATUS" "auth_tool_unavailable"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_copy"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "PuTTY plink was found but pscp is unavailable"
+    Write-Status "NEXT" "install PuTTY pscp or use OpenSSH tools"
     exit 4
 }
 
@@ -173,11 +196,11 @@ switch ($AuthMode) {
         }
     }
     "default-key-discovery" {
-        $home = [Environment]::GetFolderPath("UserProfile")
+        $userHome = [Environment]::GetFolderPath("UserProfile")
         $candidates = @(
-            (Join-Path $home ".ssh\id_ed25519"),
-            (Join-Path $home ".ssh\id_ecdsa"),
-            (Join-Path $home ".ssh\id_rsa")
+            (Join-Path $userHome ".ssh\id_ed25519"),
+            (Join-Path $userHome ".ssh\id_ecdsa"),
+            (Join-Path $userHome ".ssh\id_rsa")
         ) | Where-Object { Test-Path $_ }
         if (-not $candidates) {
             Write-Status "STATUS" "missing_key"
@@ -204,18 +227,17 @@ switch ($AuthMode) {
         $IdentityFile = $candidates[0]
     }
     "ssh-agent" {
-        $sshAdd = Get-Command ssh-add -ErrorAction SilentlyContinue
-        if (-not $sshAdd) {
+        if ($toolchain.backend -ne "openssh" -or [string]::IsNullOrWhiteSpace($toolchain.ssh_add)) {
             Write-Status "STATUS" "auth_tool_unavailable"
             Write-Status "HOST" $target
             Write-Status "ACTION" "remote_copy"
             Write-Status "AUTH_MODE" $AuthMode
             Write-Status "RISK" $Risk
-            Write-Status "REASON" "ssh-add is not available"
-            Write-Status "NEXT" "use a file-based auth mode"
+            Write-Status "REASON" "ssh-agent support requires OpenSSH ssh-add"
+            Write-Status "NEXT" "use a file-based auth mode or install OpenSSH tools"
             exit 4
         }
-        $agentOutput = & ssh-add -l 2>&1
+        $agentOutput = & $toolchain.ssh_add -l 2>&1
         $agentText = ($agentOutput | Out-String)
         if ($agentText -match "The agent has no identities") {
             Write-Status "STATUS" "missing_key"
@@ -254,25 +276,60 @@ switch ($AuthMode) {
     }
 }
 
-$sshArgs = @("-o", "ConnectTimeout=$Timeout")
-$scpArgs = @("-o", "ConnectTimeout=$Timeout")
+$sshArgs = @()
+$copyArgs = @()
+$sshProgram = ""
+$copyProgram = ""
+if ($toolchain.backend -eq "openssh") {
+    $sshProgram = $toolchain.ssh
+    $copyProgram = $toolchain.scp
+    $sshArgs += @("-o", "ConnectTimeout=$Timeout")
+    $copyArgs += @("-o", "ConnectTimeout=$Timeout")
+} else {
+    $sshProgram = $toolchain.plink
+    $copyProgram = $toolchain.pscp
+    $sshArgs += @("-batch")
+    $copyArgs += @("-batch")
+}
 if ($Port) {
-    $sshArgs += @("-p", $Port)
-    $scpArgs += @("-P", $Port)
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-p", $Port)
+        $copyArgs += @("-P", $Port)
+    } else {
+        $sshArgs += @("-P", $Port)
+        $copyArgs += @("-P", $Port)
+    }
 }
 if ($IdentityFile) {
-    $sshArgs += @("-i", $IdentityFile, "-o", "IdentitiesOnly=yes")
-    $scpArgs += @("-i", $IdentityFile, "-o", "IdentitiesOnly=yes")
+    $sshArgs += @("-i", $IdentityFile)
+    $copyArgs += @("-i", $IdentityFile)
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-o", "IdentitiesOnly=yes")
+        $copyArgs += @("-o", "IdentitiesOnly=yes")
+    }
 }
 if ($AuthMode -eq "password") {
-    $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
-    $scpArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+        $copyArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+    } else {
+        Write-Status "STATUS" "auth_mode_unsupported"
+        Write-Status "HOST" $target
+        Write-Status "ACTION" "remote_copy"
+        Write-Status "AUTH_MODE" $AuthMode
+        Write-Status "RISK" $Risk
+        Write-Status "REASON" "password automation is only implemented for OpenSSH"
+        Write-Status "NEXT" "use OpenSSH or a key-based auth mode"
+        exit 8
+    }
 } else {
-    $sshArgs += @("-o", "BatchMode=yes")
-    $scpArgs += @("-o", "BatchMode=yes")
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-o", "BatchMode=yes")
+        $copyArgs += @("-o", "BatchMode=yes")
+    }
 }
 if ($Recursive) {
-    $scpArgs += "-r"
+    $copyArgs += "-r"
 }
 
 function Invoke-ProcessCapture {
@@ -334,7 +391,7 @@ try {
 
     if ($Direction -eq "upload" -and $ConfirmationState -ne "confirmed") {
         $precheckArgs = @($sshArgs + @($target, "test -e '$($TargetPath)'"))
-        $precheck = Invoke-ProcessCapture -FilePath $sshCommand.Source -ArgumentList $precheckArgs -EnvironmentTable $envTable
+        $precheck = Invoke-ProcessCapture -FilePath $sshProgram -ArgumentList $precheckArgs -EnvironmentTable $envTable
         if ($precheck.ExitCode -eq 0) {
             Write-Status "STATUS" "pending_confirmation"
             Write-Status "HOST" $target
@@ -350,7 +407,7 @@ try {
     }
 
     $remoteSpec = "{0}:{1}" -f $target, $TargetPath
-    $scpArgList = @($scpArgs)
+    $scpArgList = @($copyArgs)
     if ($Direction -eq "upload") {
         $scpArgList += @($SourcePath, $remoteSpec)
     } else {
@@ -358,7 +415,7 @@ try {
         $scpArgList += @($remoteSource, $TargetPath)
     }
 
-    $result = Invoke-ProcessCapture -FilePath $scpCommand.Source -ArgumentList $scpArgList -EnvironmentTable $envTable
+    $result = Invoke-ProcessCapture -FilePath $copyProgram -ArgumentList $scpArgList -EnvironmentTable $envTable
 } finally {
     if ($askPassPath) {
         Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue

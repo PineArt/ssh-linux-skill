@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ssh-tools.sh"
+
 status() {
   printf '%s: %s\n' "$1" "$2"
 }
@@ -151,14 +153,15 @@ if [[ "$risk" == "high" && "$confirmation_state" != "confirmed" ]]; then
   exit 3
 fi
 
-if ! command -v ssh >/dev/null 2>&1; then
+load_ssh_toolchain || true
+if [[ "$ssh_toolchain_backend" == "none" ]]; then
   status STATUS auth_tool_unavailable
   status HOST "$target"
   status ACTION remote_exec
   status AUTH_MODE "$auth_mode"
   status RISK "$risk"
-  status REASON "ssh command is not available"
-  status NEXT "install OpenSSH client"
+  status REASON "no supported SSH backend was found"
+  status NEXT "install OpenSSH or PuTTY tools and ensure they are discoverable"
   exit 4
 fi
 
@@ -207,17 +210,17 @@ case "$auth_mode" in
     identity_file="${candidates[0]}"
     ;;
   ssh-agent)
-    if ! command -v ssh-add >/dev/null 2>&1; then
+    if [[ "$ssh_toolchain_backend" != "openssh" || -z "$ssh_add_tool" ]]; then
       status STATUS auth_tool_unavailable
       status HOST "$target"
       status ACTION remote_exec
       status AUTH_MODE "$auth_mode"
       status RISK "$risk"
-      status REASON "ssh-add is not available"
-      status NEXT "use a file-based auth mode"
+      status REASON "ssh-agent support requires OpenSSH ssh-add"
+      status NEXT "use a file-based auth mode or install OpenSSH tools"
       exit 4
     fi
-    agent_output="$(ssh-add -l 2>&1 || true)"
+    agent_output="$("$ssh_add_tool" -l 2>&1 || true)"
     if [[ "$agent_output" == *"The agent has no identities."* ]]; then
       status STATUS missing_key
       status HOST "$target"
@@ -261,17 +264,44 @@ if [[ -n "$remote_dir" ]]; then
   remote_command="cd '$escaped_dir' && $command_text"
 fi
 
-ssh_args=(-o "ConnectTimeout=$timeout")
+ssh_args=()
+ssh_program=""
+if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+  ssh_program="$ssh_tool"
+  ssh_args+=(-o "ConnectTimeout=$timeout")
+else
+  ssh_program="$plink_tool"
+  ssh_args+=(-batch)
+fi
 if [[ -n "$port" ]]; then
-  ssh_args+=(-p "$port")
+  if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+    ssh_args+=(-p "$port")
+  else
+    ssh_args+=(-P "$port")
+  fi
 fi
 if [[ -n "$identity_file" ]]; then
-  ssh_args+=(-i "$identity_file" -o "IdentitiesOnly=yes")
+  ssh_args+=(-i "$identity_file")
+  if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+    ssh_args+=(-o "IdentitiesOnly=yes")
+  fi
 fi
 if [[ "$auth_mode" == "password" ]]; then
+  if [[ "$ssh_toolchain_backend" != "openssh" ]]; then
+    status STATUS auth_mode_unsupported
+    status HOST "$target"
+    status ACTION remote_exec
+    status AUTH_MODE "$auth_mode"
+    status RISK "$risk"
+    status REASON "password automation is only implemented for OpenSSH"
+    status NEXT "use OpenSSH or a key-based auth mode"
+    exit 8
+  fi
   ssh_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
 else
-  ssh_args+=(-o "BatchMode=yes")
+  if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+    ssh_args+=(-o "BatchMode=yes")
+  fi
 fi
 
 stdout_file="$(mktemp)"
@@ -307,9 +337,9 @@ EOF
       SSH_ASKPASS="$askpass_file" \
       SSH_ASKPASS_REQUIRE=force \
       DISPLAY="${DISPLAY:-codex-ssh-linux}" \
-      ssh "${ssh_args[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+      "$ssh_program" "${ssh_args[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
   else
-    ssh "${ssh_args[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+    "$ssh_program" "${ssh_args[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
   fi
 }
 

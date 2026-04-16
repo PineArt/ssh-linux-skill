@@ -25,6 +25,8 @@ param(
     [switch]$Help
 )
 
+. (Join-Path $PSScriptRoot "ssh-tools.ps1")
+
 function Write-Status {
     param(
         [string]$Name,
@@ -117,15 +119,15 @@ if ($Risk -eq "high" -and $ConfirmationState -ne "confirmed") {
     exit 3
 }
 
-$sshCommand = Get-Command ssh -ErrorAction SilentlyContinue
-if (-not $sshCommand) {
+$toolchain = Get-SshToolchain
+if ($toolchain.backend -eq "none") {
     Write-Status "STATUS" "auth_tool_unavailable"
     Write-Status "HOST" $target
     Write-Status "ACTION" "remote_exec"
     Write-Status "AUTH_MODE" $AuthMode
     Write-Status "RISK" $Risk
-    Write-Status "REASON" "ssh command is not available"
-    Write-Status "NEXT" "install OpenSSH client"
+    Write-Status "REASON" "no supported SSH backend was found"
+    Write-Status "NEXT" "install OpenSSH or PuTTY tools and ensure they are discoverable"
     exit 4
 }
 
@@ -144,11 +146,11 @@ switch ($AuthMode) {
         }
     }
     "default-key-discovery" {
-        $home = [Environment]::GetFolderPath("UserProfile")
+        $userHome = [Environment]::GetFolderPath("UserProfile")
         $candidates = @(
-            (Join-Path $home ".ssh\id_ed25519"),
-            (Join-Path $home ".ssh\id_ecdsa"),
-            (Join-Path $home ".ssh\id_rsa")
+            (Join-Path $userHome ".ssh\id_ed25519"),
+            (Join-Path $userHome ".ssh\id_ecdsa"),
+            (Join-Path $userHome ".ssh\id_rsa")
         ) | Where-Object { Test-Path $_ }
 
         if (-not $candidates) {
@@ -176,18 +178,17 @@ switch ($AuthMode) {
         $IdentityFile = $candidates[0]
     }
     "ssh-agent" {
-        $sshAdd = Get-Command ssh-add -ErrorAction SilentlyContinue
-        if (-not $sshAdd) {
+        if ($toolchain.backend -ne "openssh" -or [string]::IsNullOrWhiteSpace($toolchain.ssh_add)) {
             Write-Status "STATUS" "auth_tool_unavailable"
             Write-Status "HOST" $target
             Write-Status "ACTION" "remote_exec"
             Write-Status "AUTH_MODE" $AuthMode
             Write-Status "RISK" $Risk
-            Write-Status "REASON" "ssh-add is not available"
-            Write-Status "NEXT" "use a file-based auth mode"
+            Write-Status "REASON" "ssh-agent support requires OpenSSH ssh-add"
+            Write-Status "NEXT" "use a file-based auth mode or install OpenSSH tools"
             exit 4
         }
-        $agentOutput = & ssh-add -l 2>&1
+        $agentOutput = & $toolchain.ssh_add -l 2>&1
         $agentText = ($agentOutput | Out-String)
         if ($agentText -match "The agent has no identities") {
             Write-Status "STATUS" "missing_key"
@@ -228,17 +229,45 @@ switch ($AuthMode) {
 
 $remoteCommand = if ($RemoteDir) { "cd '{0}' && {1}" -f ($RemoteDir -replace "'", "'\''"), $CommandText } else { $CommandText }
 
-$sshArgs = @("-o", "ConnectTimeout=$Timeout")
+$sshArgs = @()
+$sshProgram = ""
+if ($toolchain.backend -eq "openssh") {
+    $sshProgram = $toolchain.ssh
+    $sshArgs += @("-o", "ConnectTimeout=$Timeout")
+} elseif ($toolchain.backend -eq "putty") {
+    $sshProgram = $toolchain.plink
+    $sshArgs += @("-batch")
+}
 if ($Port) {
-    $sshArgs += @("-p", $Port)
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-p", $Port)
+    } else {
+        $sshArgs += @("-P", $Port)
+    }
 }
 if ($IdentityFile) {
-    $sshArgs += @("-i", $IdentityFile, "-o", "IdentitiesOnly=yes")
+    $sshArgs += @("-i", $IdentityFile)
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-o", "IdentitiesOnly=yes")
+    }
 }
 if ($AuthMode -eq "password") {
-    $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+    } else {
+        Write-Status "STATUS" "auth_mode_unsupported"
+        Write-Status "HOST" $target
+        Write-Status "ACTION" "remote_exec"
+        Write-Status "AUTH_MODE" $AuthMode
+        Write-Status "RISK" $Risk
+        Write-Status "REASON" "password automation is only implemented for OpenSSH"
+        Write-Status "NEXT" "use OpenSSH or a key-based auth mode"
+        exit 8
+    }
 } else {
-    $sshArgs += @("-o", "BatchMode=yes")
+    if ($toolchain.backend -eq "openssh") {
+        $sshArgs += @("-o", "BatchMode=yes")
+    }
 }
 $sshArgs += @($target, $remoteCommand)
 
@@ -299,7 +328,7 @@ try {
         }
     }
 
-    $result = Invoke-ProcessCapture -FilePath $sshCommand.Source -ArgumentList $sshArgs -EnvironmentTable $envTable
+    $result = Invoke-ProcessCapture -FilePath $sshProgram -ArgumentList $sshArgs -EnvironmentTable $envTable
 } finally {
     if ($askPassPath) {
         Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue

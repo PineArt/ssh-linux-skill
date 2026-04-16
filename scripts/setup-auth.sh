@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ssh-tools.sh"
+
 status() {
   printf '%s: %s\n' "$1" "$2"
 }
@@ -97,16 +99,17 @@ discover_keys() {
 }
 
 agent_keys() {
-  if ! command -v ssh-add >/dev/null 2>&1; then
+  load_ssh_toolchain || true
+  if [[ "$ssh_toolchain_backend" != "openssh" || -z "$ssh_add_tool" ]]; then
     status STATUS auth_tool_unavailable
     status ACTION auth_setup
-    status REASON "ssh-add is not available"
+    status REASON "ssh-add is not available from a detected OpenSSH toolchain"
     status NEXT "use explicit key files instead"
     return 4
   fi
 
   local output
-  output="$(ssh-add -l 2>&1 || true)"
+  output="$("$ssh_add_tool" -l 2>&1 || true)"
   if [[ "$output" == *"The agent has no identities."* ]]; then
     status STATUS no_agent_keys
     status ACTION auth_setup
@@ -123,6 +126,15 @@ agent_keys() {
 }
 
 generate_key() {
+  load_ssh_toolchain || true
+  if [[ "$ssh_toolchain_backend" != "openssh" || -z "$ssh_keygen_tool" ]]; then
+    status STATUS auth_tool_unavailable
+    status ACTION auth_setup
+    status REASON "ssh-keygen is not available from a detected OpenSSH toolchain"
+    status NEXT "install OpenSSH or Git for Windows OpenSSH tools"
+    return 4
+  fi
+
   local resolved_key_path="${key_path:-$HOME/.ssh/id_ed25519}"
   mkdir -p "$(dirname "$resolved_key_path")"
 
@@ -144,7 +156,7 @@ generate_key() {
     return 3
   fi
 
-  ssh-keygen -t "$key_type" -f "$resolved_key_path" -N "" -C "$comment" >/dev/null
+  "$ssh_keygen_tool" -t "$key_type" -f "$resolved_key_path" -N "" -C "$comment" >/dev/null
   status STATUS ok
   status ACTION auth_setup
   status REASON "generated new SSH keypair"
