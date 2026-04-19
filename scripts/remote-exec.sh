@@ -11,22 +11,45 @@ usage() {
   cat <<'EOF'
 remote-exec.sh
 
-Required:
+SUMMARY
+  Execute a command on a Linux host over SSH with auth and risk checks.
+
+USAGE
+  remote-exec.sh --host VALUE --command VALUE [options]
+  remote-exec.sh --host VALUE --command-file VALUE [options]
+  remote-exec.sh --help
+  remote-exec.sh --help-json
+
+ARGUMENTS
   --host VALUE
   --command VALUE | --command-file VALUE
-
-Optional:
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
   --identity-file VALUE
   --known-hosts-file VALUE
-  --command-file VALUE
   --remote-dir VALUE
   --risk auto|low|high
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --help | -h
+  --help-json
+
+OUTPUT CONTRACT
+  Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
+  Optional blocks: OUTPUT, STDERR
+
+EXAMPLES
+  remote-exec.sh --host app-prod --command "uname -a"
+  remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh
+  remote-exec.sh --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
+EOF
+}
+
+help_json() {
+  cat <<'EOF'
+{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","command_failed"]}}
 EOF
 }
 
@@ -100,6 +123,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       usage
+      exit 0
+      ;;
+    --help-json)
+      help_json
       exit 0
       ;;
     *)
@@ -311,6 +338,10 @@ remote_command="$command_text"
 if [[ -n "$remote_dir" ]]; then
   remote_command="cd '$escaped_dir' && $command_text"
 fi
+is_command_file_mode="false"
+if [[ -n "$command_file" ]]; then
+  is_command_file_mode="true"
+fi
 
 ssh_args=()
 ssh_program=""
@@ -365,6 +396,13 @@ cleanup() {
 trap cleanup EXIT
 
 run_ssh() {
+  local remote_program=("$ssh_program" "${ssh_args[@]}")
+  local remote_script_prefix=""
+
+  if [[ -n "$remote_dir" ]]; then
+    remote_script_prefix=$(printf "cd '%s' || exit \$?\n" "$escaped_dir")
+  fi
+
   if [[ "$auth_mode" == "password" ]]; then
     password_value="${!password_env-}"
     if [[ -z "$password_value" ]]; then
@@ -383,14 +421,37 @@ run_ssh() {
 printf '%s\n' "$SSH_LINUX_ASKPASS_SECRET"
 EOF
     chmod 700 "$askpass_file"
-    env \
-      SSH_LINUX_ASKPASS_SECRET="$password_value" \
-      SSH_ASKPASS="$askpass_file" \
-      SSH_ASKPASS_REQUIRE=force \
-      DISPLAY="${DISPLAY:-codex-ssh-linux}" \
-      "$ssh_program" "${ssh_args[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+    if [[ "$is_command_file_mode" == "true" ]]; then
+      {
+        if [[ -n "$remote_script_prefix" ]]; then
+          printf '%s' "$remote_script_prefix"
+        fi
+        cat -- "$command_file"
+      } | env \
+        SSH_LINUX_ASKPASS_SECRET="$password_value" \
+        SSH_ASKPASS="$askpass_file" \
+        SSH_ASKPASS_REQUIRE=force \
+        DISPLAY="${DISPLAY:-codex-ssh-linux}" \
+        "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
+    else
+      env \
+        SSH_LINUX_ASKPASS_SECRET="$password_value" \
+        SSH_ASKPASS="$askpass_file" \
+        SSH_ASKPASS_REQUIRE=force \
+        DISPLAY="${DISPLAY:-codex-ssh-linux}" \
+        "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+    fi
   else
-    "$ssh_program" "${ssh_args[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+    if [[ "$is_command_file_mode" == "true" ]]; then
+      {
+        if [[ -n "$remote_script_prefix" ]]; then
+          printf '%s' "$remote_script_prefix"
+        fi
+        cat -- "$command_file"
+      } | "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
+    else
+      "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+    fi
   fi
 }
 

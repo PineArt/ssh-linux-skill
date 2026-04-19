@@ -11,13 +11,19 @@ usage() {
   cat <<'EOF'
 remote-copy.sh
 
-Required:
+SUMMARY
+  Upload or download files over SSH/SCP with auth and risk checks.
+
+USAGE
+  remote-copy.sh --host VALUE --direction upload|download --source VALUE --target VALUE [options]
+  remote-copy.sh --help
+  remote-copy.sh --help-json
+
+ARGUMENTS
   --host VALUE
   --direction upload|download
   --source VALUE
   --target VALUE
-
-Optional:
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
@@ -28,6 +34,24 @@ Optional:
   --password-env VALUE
   --timeout VALUE
   --recursive
+  --help | -h
+  --help-json
+
+OUTPUT CONTRACT
+  Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
+  Transfer labels: DIRECTION, SOURCE, TARGET
+  Optional blocks: OUTPUT, STDERR
+
+EXAMPLES
+  remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz
+  remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log
+  remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed
+EOF
+}
+
+help_json() {
+  cat <<'EOF'
+{"name":"remote-copy.sh","summary":"Upload or download files over SSH/SCP with auth and risk checks.","usage":["remote-copy.sh --host VALUE --direction upload|download --source VALUE --target VALUE [options]","remote-copy.sh --help","remote-copy.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--direction","required":true,"value":"upload|download","description":"Transfer direction."},{"name":"--source","required":true,"value":"VALUE","description":"Source path (local for upload, remote for download)."},{"name":"--target","required":true,"value":"VALUE","description":"Target path (remote for upload, local for download)."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies path sensitivity."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--recursive","required":false,"value":"","description":"Enable recursive copy for directories."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz","remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log","remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with transfer context and optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DIRECTION","SOURCE","TARGET"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_source","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","transfer_failed"]}}
 EOF
 }
 
@@ -106,6 +130,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       usage
+      exit 0
+      ;;
+    --help-json)
+      help_json
       exit 0
       ;;
     *)

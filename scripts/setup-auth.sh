@@ -11,20 +11,37 @@ usage() {
   cat <<'EOF'
 setup-auth.sh
 
-Required:
-  --action discover|agent|generate|show-public
+SUMMARY
+  Inspect and manage SSH authentication state for Linux SSH operations.
 
-Optional:
+USAGE
+  setup-auth.sh --action discover|agent|generate|show-public [options]
+  setup-auth.sh --help
+  setup-auth.sh --help-json
+
+ARGUMENTS
+  --action discover|agent|generate|show-public
   --key-path VALUE
   --key-type ed25519|ecdsa|rsa
   --comment VALUE
   --confirmation-state pending|confirmed
+  --help | -h
+  --help-json
 
-Examples:
+OUTPUT CONTRACT
+  Plain-text labels: STATUS, ACTION, REASON, NEXT
+
+EXAMPLES
   setup-auth.sh --action discover
   setup-auth.sh --action agent
   setup-auth.sh --action generate --confirmation-state confirmed
   setup-auth.sh --action show-public --key-path ~/.ssh/id_ed25519
+EOF
+}
+
+help_json() {
+  cat <<'EOF'
+{"name":"setup-auth.sh","summary":"Inspect and manage SSH authentication state for Linux SSH operations.","usage":["setup-auth.sh --action discover|agent|generate|show-public [options]","setup-auth.sh --help","setup-auth.sh --help-json"],"arguments":[{"name":"--action","required":true,"value":"discover|agent|generate|show-public","description":"Auth setup action."},{"name":"--key-path","required":false,"value":"VALUE","description":"Private key path for generate/show-public."},{"name":"--key-type","required":false,"value":"ed25519|ecdsa|rsa","description":"Key algorithm when generating."},{"name":"--comment","required":false,"value":"VALUE","description":"Comment written into generated public key."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed","description":"Confirmation gate for key generation."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["setup-auth.sh --action discover","setup-auth.sh --action agent","setup-auth.sh --action generate --confirmation-state confirmed","setup-auth.sh --action show-public --key-path ~/.ssh/id_ed25519"],"output_contract":{"format":"plain-text status labels plus contextual sections","labels":["STATUS","ACTION","REASON","NEXT"],"common_statuses":["ok","invalid_arguments","pending_confirmation","auth_tool_unavailable","no_keys_found","no_agent_keys","missing_key","auth_setup_failed"]}}
 EOF
 }
 
@@ -58,6 +75,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help|-h)
       usage
+      exit 0
+      ;;
+    --help-json)
+      help_json
       exit 0
       ;;
     *)
