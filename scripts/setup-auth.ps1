@@ -10,7 +10,11 @@ param(
 
     [string]$ConfirmationState = "pending",
 
-    [switch]$Help
+    [Alias("h")]
+    [switch]$Help,
+
+    [Alias("help-json")]
+    [switch]$HelpJson
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
@@ -23,23 +27,88 @@ function Write-Status {
     Write-Output ("{0}: {1}" -f $Name, $Value)
 }
 
+function Get-HelpSpec {
+    return [ordered]@{
+        name = "setup-auth.ps1"
+        summary = "Inspect and manage SSH authentication state for Linux SSH operations."
+        usage = @(
+            "setup-auth.ps1 --action discover|agent|generate|show-public [options]",
+            "setup-auth.ps1 --help",
+            "setup-auth.ps1 --help-json"
+        )
+        arguments = @(
+            [ordered]@{ name = "--action"; required = $true; value = "discover|agent|generate|show-public"; description = "Auth setup action." },
+            [ordered]@{ name = "--key-path"; required = $false; value = "VALUE"; description = "Private key path for generate/show-public." },
+            [ordered]@{ name = "--key-type"; required = $false; value = "ed25519|ecdsa|rsa"; description = "Key algorithm when generating." },
+            [ordered]@{ name = "--comment"; required = $false; value = "VALUE"; description = "Comment written into generated public key." },
+            [ordered]@{ name = "--confirmation-state"; required = $false; value = "pending|confirmed"; description = "Confirmation gate for key generation." },
+            [ordered]@{ name = "--help|-h|-Help"; required = $false; value = ""; description = "Show human-readable help." },
+            [ordered]@{ name = "--help-json|-help-json"; required = $false; value = ""; description = "Show machine-readable JSON help." }
+        )
+        examples = @(
+            "setup-auth.ps1 --action discover",
+            "setup-auth.ps1 --action agent",
+            "setup-auth.ps1 --action generate --key-type ed25519 --confirmation-state confirmed",
+            "setup-auth.ps1 --action show-public --key-path $HOME\.ssh\id_ed25519"
+        )
+        output_contract = [ordered]@{
+            format = "plain-text status labels plus contextual sections"
+            labels = @("STATUS", "ACTION", "REASON", "NEXT")
+            common_statuses = @(
+                "ok", "invalid_arguments", "pending_confirmation", "auth_tool_unavailable",
+                "no_keys_found", "no_agent_keys", "missing_key", "auth_setup_failed"
+            )
+        }
+    }
+}
+
 function Show-Usage {
     @"
 setup-auth.ps1
 
-Required:
-  --action discover|agent|generate|show-public
+SUMMARY
+  Inspect and manage SSH authentication state for Linux SSH operations.
 
-Optional:
+USAGE
+  setup-auth.ps1 --action discover|agent|generate|show-public [options]
+  setup-auth.ps1 --help
+  setup-auth.ps1 --help-json
+
+ARGUMENTS
+  --action discover|agent|generate|show-public
   --key-path VALUE
   --key-type ed25519|ecdsa|rsa
   --comment VALUE
   --confirmation-state pending|confirmed
+  --help | -h | -Help
+  --help-json | -help-json
+
+OUTPUT CONTRACT
+  Plain-text labels: STATUS, ACTION, REASON, NEXT
+
+EXAMPLES
+  setup-auth.ps1 --action discover
+  setup-auth.ps1 --action agent
+  setup-auth.ps1 --action generate --key-type ed25519 --confirmation-state confirmed
+  setup-auth.ps1 --action show-public --key-path $HOME\.ssh\id_ed25519
 "@
 }
 
-if ($Help) {
+function Show-HelpJson {
+    $helpSpec = Get-HelpSpec
+    $helpSpec | ConvertTo-Json -Depth 8
+}
+
+$compatHelpRequested = $Action -in @("--help", "-h", "-Help")
+$compatHelpJsonRequested = $Action -eq "--help-json"
+
+if ($Help -or $compatHelpRequested) {
     Show-Usage
+    exit 0
+}
+
+if ($HelpJson -or $compatHelpJsonRequested) {
+    Show-HelpJson
     exit 0
 }
 
@@ -59,7 +128,7 @@ function Get-DefaultKeyPaths {
 
 switch ($Action) {
     "discover" {
-        $keys = Get-DefaultKeyPaths | Where-Object { Test-Path $_ }
+        $keys = Get-DefaultKeyPaths | Where-Object { Test-Path -LiteralPath $_ }
         if (-not $keys) {
             Write-Status "STATUS" "no_keys_found"
             Write-Status "ACTION" "auth_setup"
@@ -110,11 +179,11 @@ switch ($Action) {
         $userHome = [Environment]::GetFolderPath("UserProfile")
         $keyPath = if ($KeyPath) { $KeyPath } else { Join-Path $userHome ".ssh\id_ed25519" }
         $dir = Split-Path -Parent $keyPath
-        if (-not (Test-Path $dir)) {
+        if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Force -Path $dir | Out-Null
         }
 
-        if ((Test-Path $keyPath) -and $ConfirmationState -ne "confirmed") {
+        if ((Test-Path -LiteralPath $keyPath) -and $ConfirmationState -ne "confirmed") {
             Write-Status "STATUS" "pending_confirmation"
             Write-Status "ACTION" "auth_setup"
             Write-Status "REASON" "key path already exists and generation would overwrite or replace an existing key"
@@ -152,7 +221,7 @@ switch ($Action) {
         $userHome = [Environment]::GetFolderPath("UserProfile")
         $keyPath = if ($KeyPath) { $KeyPath } else { Join-Path $userHome ".ssh\id_ed25519" }
         $publicPath = "{0}.pub" -f $keyPath
-        if (-not (Test-Path $publicPath)) {
+        if (-not (Test-Path -LiteralPath $publicPath)) {
             Write-Status "STATUS" "missing_key"
             Write-Status "ACTION" "auth_setup"
             Write-Status "REASON" "public key file not found"

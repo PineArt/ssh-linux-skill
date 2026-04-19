@@ -28,7 +28,11 @@ param(
 
     [switch]$Recursive,
 
-    [switch]$Help
+    [Alias("h")]
+    [switch]$Help,
+
+    [Alias("help-json")]
+    [switch]$HelpJson
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
@@ -42,17 +46,69 @@ function Write-Status {
     Write-Output ("{0}: {1}" -f $Name, $Value)
 }
 
+function Get-HelpSpec {
+    return [ordered]@{
+        name = "remote-copy.ps1"
+        summary = "Upload or download files over SSH/SCP with auth and risk checks."
+        usage = @(
+            "remote-copy.ps1 --host VALUE --direction upload|download --source VALUE --target VALUE [options]",
+            "remote-copy.ps1 --help",
+            "remote-copy.ps1 --help-json"
+        )
+        arguments = @(
+            [ordered]@{ name = "--host"; required = $true; value = "VALUE"; description = "SSH host, alias, or user@host target." },
+            [ordered]@{ name = "--direction"; required = $true; value = "upload|download"; description = "Transfer direction." },
+            [ordered]@{ name = "--source"; required = $true; value = "VALUE"; description = "Source path (local for upload, remote for download)." },
+            [ordered]@{ name = "--target"; required = $true; value = "VALUE"; description = "Target path (remote for upload, local for download)." },
+            [ordered]@{ name = "--user"; required = $false; value = "VALUE"; description = "Username, used when host is not in user@host form." },
+            [ordered]@{ name = "--port"; required = $false; value = "VALUE"; description = "SSH port." },
+            [ordered]@{ name = "--auth-mode"; required = $false; value = "ssh-alias|identity-file|default-key-discovery|ssh-agent|password"; description = "Authentication strategy." },
+            [ordered]@{ name = "--identity-file"; required = $false; value = "VALUE"; description = "Private key path for identity-file mode." },
+            [ordered]@{ name = "--known-hosts-file"; required = $false; value = "VALUE"; description = "known_hosts path for host key verification." },
+            [ordered]@{ name = "--risk"; required = $false; value = "auto|low|high"; description = "Risk override. auto classifies path sensitivity." },
+            [ordered]@{ name = "--confirmation-state"; required = $false; value = "pending|confirmed|none"; description = "High-risk confirmation gate." },
+            [ordered]@{ name = "--password-env"; required = $false; value = "VALUE"; description = "Environment variable name for password mode." },
+            [ordered]@{ name = "--timeout"; required = $false; value = "VALUE"; description = "SSH connect timeout in seconds." },
+            [ordered]@{ name = "--recursive"; required = $false; value = ""; description = "Enable recursive copy for directories." },
+            [ordered]@{ name = "--help|-h|-Help"; required = $false; value = ""; description = "Show human-readable help." },
+            [ordered]@{ name = "--help-json|-help-json"; required = $false; value = ""; description = "Show machine-readable JSON help." }
+        )
+        examples = @(
+            "remote-copy.ps1 --host app-prod --direction upload --source .\build\app.tar.gz --target /tmp/app.tar.gz",
+            "remote-copy.ps1 --host app-prod --direction download --source /var/log/nginx/access.log --target .\logs\access.log",
+            "remote-copy.ps1 --host app-prod --direction upload --source .\config.env --target /etc/app/config.env --confirmation-state confirmed"
+        )
+        output_contract = [ordered]@{
+            format = "plain-text status labels with transfer context and optional OUTPUT/STDERR blocks"
+            labels = @("STATUS", "HOST", "ACTION", "AUTH_MODE", "RISK", "REASON", "NEXT")
+            extra_labels = @("DIRECTION", "SOURCE", "TARGET")
+            common_statuses = @(
+                "ok", "invalid_arguments", "pending_confirmation", "missing_source",
+                "auth_tool_unavailable", "missing_key", "key_ambiguous", "missing_known_hosts",
+                "interactive_password_required", "auth_mode_unsupported", "auth_failed",
+                "connect_failed", "transfer_failed"
+            )
+        }
+    }
+}
+
 function Show-Usage {
     @"
 remote-copy.ps1
 
-Required:
+SUMMARY
+  Upload or download files over SSH/SCP with auth and risk checks.
+
+USAGE
+  remote-copy.ps1 --host VALUE --direction upload|download --source VALUE --target VALUE [options]
+  remote-copy.ps1 --help
+  remote-copy.ps1 --help-json
+
+ARGUMENTS
   --host VALUE
   --direction upload|download
   --source VALUE
   --target VALUE
-
-Optional:
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
@@ -63,11 +119,36 @@ Optional:
   --password-env VALUE
   --timeout VALUE
   --recursive
+  --help | -h | -Help
+  --help-json | -help-json
+
+OUTPUT CONTRACT
+  Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
+  Transfer labels: DIRECTION, SOURCE, TARGET
+  Optional blocks: OUTPUT, STDERR
+
+EXAMPLES
+  remote-copy.ps1 --host app-prod --direction upload --source .\build\app.tar.gz --target /tmp/app.tar.gz
+  remote-copy.ps1 --host app-prod --direction download --source /var/log/nginx/access.log --target .\logs\access.log
+  remote-copy.ps1 --host app-prod --direction upload --source .\config.env --target /etc/app/config.env --confirmation-state confirmed
 "@
 }
 
-if ($Help) {
+function Show-HelpJson {
+    $helpSpec = Get-HelpSpec
+    $helpSpec | ConvertTo-Json -Depth 8
+}
+
+$compatHelpRequested = $HostName -in @("--help", "-h", "-Help")
+$compatHelpJsonRequested = $HostName -eq "--help-json"
+
+if ($Help -or $compatHelpRequested) {
     Show-Usage
+    exit 0
+}
+
+if ($HelpJson -or $compatHelpJsonRequested) {
+    Show-HelpJson
     exit 0
 }
 
@@ -205,7 +286,7 @@ switch ($AuthMode) {
             (Join-Path $userHome ".ssh\id_ed25519"),
             (Join-Path $userHome ".ssh\id_ecdsa"),
             (Join-Path $userHome ".ssh\id_rsa")
-        ) | Where-Object { Test-Path $_ }
+        ) | Where-Object { Test-Path -LiteralPath $_ }
         if (-not $candidates) {
             Write-Status "STATUS" "missing_key"
             Write-Status "HOST" $target
@@ -326,8 +407,9 @@ if ($IdentityFile) {
     }
 }
 if ($resolvedKnownHostsFile -and $toolchain.backend -eq "openssh") {
-    $sshArgs += @("-o", "UserKnownHostsFile=$resolvedKnownHostsFile")
-    $copyArgs += @("-o", "UserKnownHostsFile=$resolvedKnownHostsFile")
+    $knownHostsOption = Format-OpenSshOptionAssignment -Name "UserKnownHostsFile" -Value $resolvedKnownHostsFile
+    $sshArgs += @("-o", $knownHostsOption)
+    $copyArgs += @("-o", $knownHostsOption)
 }
 if ($AuthMode -eq "password") {
     if ($toolchain.backend -eq "openssh") {
@@ -369,8 +451,7 @@ try {
             exit 7
         }
 
-        $askPassPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".cmd")
-        Set-Content -LiteralPath $askPassPath -Encoding ASCII -Value "@echo off`r`necho %SSH_LINUX_ASKPASS_SECRET%`r`n"
+        $askPassPath = New-SshAskPassScript
         $envTable = @{
             SSH_LINUX_ASKPASS_SECRET = $passwordValue
             SSH_ASKPASS = $askPassPath

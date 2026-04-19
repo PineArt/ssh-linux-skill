@@ -87,7 +87,9 @@ function Invoke-NativeProcessCapture {
     param(
         [string]$FilePath,
         [string[]]$ArgumentList,
-        [hashtable]$EnvironmentTable
+        [hashtable]$EnvironmentTable,
+        [AllowEmptyString()]
+        [string]$InputText
     )
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -95,6 +97,7 @@ function Invoke-NativeProcessCapture {
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.RedirectStandardInput = ($PSBoundParameters.ContainsKey('InputText'))
     $startInfo.CreateNoWindow = $true
 
     $argumentListProperty = $startInfo.GetType().GetProperty("ArgumentList")
@@ -119,6 +122,10 @@ function Invoke-NativeProcessCapture {
         [void]$process.Start()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($PSBoundParameters.ContainsKey('InputText')) {
+            $process.StandardInput.Write($InputText)
+            $process.StandardInput.Close()
+        }
         $process.WaitForExit()
         [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
 
@@ -143,6 +150,83 @@ function Read-TextFileAuto {
     } finally {
         $reader.Dispose()
     }
+}
+
+function Get-PowerShellExecutablePath {
+    $candidates = @()
+
+    try {
+        $currentProcessPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        if (-not [string]::IsNullOrWhiteSpace($currentProcessPath)) {
+            $candidates += $currentProcessPath
+        }
+    } catch {
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PSHOME)) {
+        $candidates += (Join-Path $PSHOME "pwsh.exe")
+        $candidates += (Join-Path $PSHOME "powershell.exe")
+    }
+
+    foreach ($commandName in @("pwsh", "powershell")) {
+        $command = Get-Command $commandName -ErrorAction SilentlyContinue
+        if ($command -and $command.Source) {
+            $candidates += $command.Source
+        }
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+
+        $normalized = [System.IO.Path]::GetFullPath($candidate)
+        if ($seen.ContainsKey($normalized)) {
+            continue
+        }
+
+        $seen[$normalized] = $true
+        return $normalized
+    }
+
+    throw "Unable to resolve a PowerShell executable for SSH_ASKPASS."
+}
+
+function Format-OpenSshOptionAssignment {
+    param(
+        [string]$Name,
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value) {
+        $Value = ""
+    }
+
+    $escapedValue = $Value -replace '"', '\"'
+    if ($escapedValue -match '[\s"]') {
+        return '{0}="{1}"' -f $Name, $escapedValue
+    }
+
+    return '{0}={1}' -f $Name, $escapedValue
+}
+
+function New-SshAskPassScript {
+    $askPassPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".cmd")
+    $powerShellPath = Get-PowerShellExecutablePath
+
+    $scriptContent = @"
+@echo off
+"$powerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Write-Output `$env:SSH_LINUX_ASKPASS_SECRET"
+"@
+
+    Set-Content -LiteralPath $askPassPath -Encoding ASCII -Value $scriptContent
+    return $askPassPath
 }
 
 function ConvertTo-PosixSingleQuotedString {
@@ -186,4 +270,63 @@ function Resolve-KnownHostsFile {
     }
 
     return ""
+}
+
+if ($MyInvocation.InvocationName -ne ".") {
+    $showHelp = $args -contains "-h" -or $args -contains "--help" -or $args -contains "-Help"
+    $showHelpJson = $args -contains "--help-json" -or $args -contains "-help-json"
+
+    if ($showHelpJson) {
+        [ordered]@{
+            name = "process-utils.ps1"
+            summary = "PowerShell utility module for native process invocation and SSH helper utilities."
+            exported_functions = @(
+                "ConvertTo-WindowsCommandLineArgument",
+                "Join-WindowsCommandLine",
+                "Set-ProcessEnvironmentValue",
+                "Invoke-NativeProcessCapture",
+                "Read-TextFileAuto",
+                "Get-PowerShellExecutablePath",
+                "Format-OpenSshOptionAssignment",
+                "New-SshAskPassScript",
+                "ConvertTo-PosixSingleQuotedString",
+                "Resolve-KnownHostsFile"
+            )
+            usage = @(
+                "Dot-source from entry scripts: . .\\process-utils.ps1",
+                "Direct run for diagnostics: .\\process-utils.ps1 --help",
+                "Direct run for machine-readable diagnostics: .\\process-utils.ps1 --help-json"
+            )
+        } | ConvertTo-Json -Depth 4
+        exit 0
+    }
+
+    if ($showHelp -or $args.Count -eq 0) {
+        @"
+process-utils.ps1
+
+SUMMARY
+  PowerShell utility module for native process invocation and SSH helper utilities.
+
+USAGE
+  Dot-source from entry scripts:
+    . .\process-utils.ps1
+  Direct run for diagnostics:
+    .\process-utils.ps1 --help
+    .\process-utils.ps1 --help-json
+
+EXPORTED FUNCTIONS
+  ConvertTo-WindowsCommandLineArgument
+  Join-WindowsCommandLine
+  Set-ProcessEnvironmentValue
+  Invoke-NativeProcessCapture
+  Read-TextFileAuto
+  Get-PowerShellExecutablePath
+  Format-OpenSshOptionAssignment
+  New-SshAskPassScript
+  ConvertTo-PosixSingleQuotedString
+  Resolve-KnownHostsFile
+"@ | Write-Output
+        exit 0
+    }
 }

@@ -26,7 +26,11 @@ param(
 
     [string]$Timeout = "15",
 
-    [switch]$Help
+    [Alias("h")]
+    [switch]$Help,
+
+    [Alias("help-json")]
+    [switch]$HelpJson
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
@@ -40,31 +44,124 @@ function Write-Status {
     Write-Output ("{0}: {1}" -f $Name, $Value)
 }
 
+function Get-HelpSpec {
+    return [ordered]@{
+        name = "remote-exec.ps1"
+        summary = "Execute a command on a Linux host over SSH with auth and risk checks."
+        usage = @(
+            "remote-exec.ps1 --host VALUE --command VALUE [options]",
+            "remote-exec.ps1 --host VALUE --command-file VALUE [options]",
+            "remote-exec.ps1 --help",
+            "remote-exec.ps1 --help-json"
+        )
+        arguments = @(
+            [ordered]@{ name = "--host"; required = $true; value = "VALUE"; description = "SSH host, alias, or user@host target." },
+            [ordered]@{ name = "--command"; required = $false; value = "VALUE"; description = "Inline command text to execute remotely." },
+            [ordered]@{ name = "--command-file"; required = $false; value = "VALUE"; description = "Path to a local file containing remote shell script text streamed over stdin." },
+            [ordered]@{ name = "--user"; required = $false; value = "VALUE"; description = "Username, used when host is not in user@host form." },
+            [ordered]@{ name = "--port"; required = $false; value = "VALUE"; description = "SSH port." },
+            [ordered]@{ name = "--auth-mode"; required = $false; value = "ssh-alias|identity-file|default-key-discovery|ssh-agent|password"; description = "Authentication strategy." },
+            [ordered]@{ name = "--identity-file"; required = $false; value = "VALUE"; description = "Private key path for identity-file mode." },
+            [ordered]@{ name = "--known-hosts-file"; required = $false; value = "VALUE"; description = "known_hosts path for host key verification." },
+            [ordered]@{ name = "--remote-dir"; required = $false; value = "VALUE"; description = "Remote working directory before command execution." },
+            [ordered]@{ name = "--risk"; required = $false; value = "auto|low|high"; description = "Risk override. auto classifies command content." },
+            [ordered]@{ name = "--confirmation-state"; required = $false; value = "pending|confirmed|none"; description = "High-risk confirmation gate." },
+            [ordered]@{ name = "--password-env"; required = $false; value = "VALUE"; description = "Environment variable name for password mode." },
+            [ordered]@{ name = "--timeout"; required = $false; value = "VALUE"; description = "SSH connect timeout in seconds." },
+            [ordered]@{ name = "--help|-h|-Help"; required = $false; value = ""; description = "Show human-readable help." },
+            [ordered]@{ name = "--help-json|-help-json"; required = $false; value = ""; description = "Show machine-readable JSON help." }
+        )
+        examples = @(
+            "remote-exec.ps1 --host app-prod --command `"uname -a`"",
+            "remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh",
+            "remote-exec.ps1 --host app-prod --command `"systemctl restart nginx`" --confirmation-state confirmed"
+        )
+        output_contract = [ordered]@{
+            format = "plain-text status labels with optional OUTPUT/STDERR blocks"
+            labels = @("STATUS", "HOST", "ACTION", "AUTH_MODE", "RISK", "REASON", "NEXT")
+            common_statuses = @(
+                "ok", "invalid_arguments", "pending_confirmation", "missing_command_file",
+                "auth_tool_unavailable", "missing_key", "key_ambiguous", "missing_known_hosts",
+                "interactive_password_required", "auth_mode_unsupported", "auth_failed",
+                "connect_failed", "command_failed"
+            )
+        }
+    }
+}
+
 function Show-Usage {
     @"
 remote-exec.ps1
 
-Required:
+SUMMARY
+  Execute a command on a Linux host over SSH with auth and risk checks.
+
+USAGE
+  remote-exec.ps1 --host VALUE --command VALUE [options]
+  remote-exec.ps1 --host VALUE --command-file VALUE [options]
+  remote-exec.ps1 --help
+  remote-exec.ps1 --help-json
+
+ARGUMENTS
   --host VALUE
   --command VALUE | --command-file VALUE
-
-Optional:
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
   --identity-file VALUE
   --known-hosts-file VALUE
-  --command-file VALUE
   --remote-dir VALUE
   --risk auto|low|high
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --help | -h | -Help
+  --help-json | -help-json
+
+OUTPUT CONTRACT
+  Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
+  Optional blocks: OUTPUT, STDERR
+
+EXAMPLES
+  remote-exec.ps1 --host app-prod --command "uname -a"
+  remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh
+  remote-exec.ps1 --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
 "@
 }
 
-if ($Help) {
+function Show-HelpJson {
+    $helpSpec = Get-HelpSpec
+    $helpSpec | ConvertTo-Json -Depth 8
+}
+
+function New-RemoteScriptInputText {
+    param(
+        [string]$ScriptText,
+        [string]$RemoteDir
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RemoteDir)) {
+        return $ScriptText
+    }
+
+    $prefix = 'cd {0} || exit $?' -f (ConvertTo-PosixSingleQuotedString -Value $RemoteDir)
+    if ([string]::IsNullOrEmpty($ScriptText)) {
+        return $prefix + "`n"
+    }
+
+    return "{0}`n{1}" -f $prefix, $ScriptText
+}
+
+$compatHelpRequested = $HostName -in @("--help", "-h", "-Help")
+$compatHelpJsonRequested = $HostName -eq "--help-json"
+
+if ($Help -or $compatHelpRequested) {
     Show-Usage
+    exit 0
+}
+
+if ($HelpJson -or $compatHelpJsonRequested) {
+    Show-HelpJson
     exit 0
 }
 
@@ -178,7 +275,7 @@ switch ($AuthMode) {
             (Join-Path $userHome ".ssh\id_ed25519"),
             (Join-Path $userHome ".ssh\id_ecdsa"),
             (Join-Path $userHome ".ssh\id_rsa")
-        ) | Where-Object { Test-Path $_ }
+        ) | Where-Object { Test-Path -LiteralPath $_ }
 
         if (-not $candidates) {
             Write-Status "STATUS" "missing_key"
@@ -267,7 +364,12 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedKnownHostsFile) -and -not (Test-P
     exit 5
 }
 
+$isCommandFileMode = -not [string]::IsNullOrWhiteSpace($CommandFile)
+
+# The caller owns remote shell quoting for CommandText. Only RemoteDir is
+# shell-escaped here because it is always treated as a path literal.
 $remoteCommand = if ($RemoteDir) { "cd {0} && {1}" -f (ConvertTo-PosixSingleQuotedString -Value $RemoteDir), $CommandText } else { $CommandText }
+$remoteScriptInputText = if ($isCommandFileMode) { New-RemoteScriptInputText -ScriptText $CommandText -RemoteDir $RemoteDir } else { $null }
 
 $sshArgs = @()
 $sshProgram = ""
@@ -292,7 +394,7 @@ if ($IdentityFile) {
     }
 }
 if ($resolvedKnownHostsFile -and $toolchain.backend -eq "openssh") {
-    $sshArgs += @("-o", "UserKnownHostsFile=$resolvedKnownHostsFile")
+    $sshArgs += @("-o", (Format-OpenSshOptionAssignment -Name "UserKnownHostsFile" -Value $resolvedKnownHostsFile))
 }
 if ($AuthMode -eq "password") {
     if ($toolchain.backend -eq "openssh") {
@@ -312,7 +414,11 @@ if ($AuthMode -eq "password") {
         $sshArgs += @("-o", "BatchMode=yes")
     }
 }
-$sshArgs += @($target, $remoteCommand)
+if ($isCommandFileMode) {
+    $sshArgs += @($target, "sh -s")
+} else {
+    $sshArgs += @($target, $remoteCommand)
+}
 
 $envTable = @{}
 $askPassPath = $null
@@ -330,8 +436,7 @@ try {
             exit 7
         }
 
-        $askPassPath = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), ".cmd")
-        Set-Content -LiteralPath $askPassPath -Encoding ASCII -Value "@echo off`r`necho %SSH_LINUX_ASKPASS_SECRET%`r`n"
+        $askPassPath = New-SshAskPassScript
         $envTable = @{
             SSH_LINUX_ASKPASS_SECRET = $passwordValue
             SSH_ASKPASS = $askPassPath
@@ -340,7 +445,16 @@ try {
         }
     }
 
-    $result = Invoke-NativeProcessCapture -FilePath $sshProgram -ArgumentList $sshArgs -EnvironmentTable $envTable
+    $invokeParams = @{
+        FilePath = $sshProgram
+        ArgumentList = $sshArgs
+        EnvironmentTable = $envTable
+    }
+    if ($isCommandFileMode) {
+        $invokeParams.InputText = $remoteScriptInputText
+    }
+
+    $result = Invoke-NativeProcessCapture @invokeParams
 } finally {
     if ($askPassPath) {
         Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue

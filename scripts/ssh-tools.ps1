@@ -9,7 +9,7 @@ function Get-UniqueExistingPaths {
         if ([string]::IsNullOrWhiteSpace($candidate)) {
             continue
         }
-        if (Test-Path $candidate) {
+        if (Test-Path -LiteralPath $candidate) {
             $normalized = [System.IO.Path]::GetFullPath($candidate)
             if (-not $seen.ContainsKey($normalized)) {
                 $seen[$normalized] = $true
@@ -123,5 +123,46 @@ function Get-SshToolchain {
         scp_candidates = $scpCandidates
         plink_candidates = $plinkCandidates
         pscp_candidates = $pscpCandidates
+    }
+}
+
+if ($MyInvocation.InvocationName -ne ".") {
+    $showHelp = $args -contains "-h" -or $args -contains "--help" -or $args -contains "-Help"
+    $showHelpJson = $args -contains "--help-json" -or $args -contains "-help-json"
+
+    if ($showHelpJson) {
+        [ordered]@{
+            name = "ssh-tools.ps1"
+            summary = "PowerShell utility module for SSH toolchain discovery."
+            exported_functions = @("Get-UniqueExistingPaths", "Find-ExecutableCandidates", "Get-SshToolchain")
+            usage = @(
+                "Dot-source from entry scripts: . .\\ssh-tools.ps1",
+                "Direct run for diagnostics: .\\ssh-tools.ps1 --help",
+                "Direct run for machine-readable diagnostics: .\\ssh-tools.ps1 --help-json"
+            )
+        } | ConvertTo-Json -Depth 4
+        exit 0
+    }
+
+    if ($showHelp -or $args.Count -eq 0) {
+        @"
+ssh-tools.ps1
+
+SUMMARY
+  PowerShell utility module for SSH toolchain discovery.
+
+USAGE
+  Dot-source from entry scripts:
+    . .\ssh-tools.ps1
+  Direct run for diagnostics:
+    .\ssh-tools.ps1 --help
+    .\ssh-tools.ps1 --help-json
+
+EXPORTED FUNCTIONS
+  Get-UniqueExistingPaths
+  Find-ExecutableCandidates
+  Get-SshToolchain
+"@ | Write-Output
+        exit 0
     }
 }
