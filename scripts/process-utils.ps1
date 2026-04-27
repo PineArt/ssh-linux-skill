@@ -89,7 +89,8 @@ function Invoke-NativeProcessCapture {
         [string[]]$ArgumentList,
         [hashtable]$EnvironmentTable,
         [AllowEmptyString()]
-        [string]$InputText
+        [string]$InputText,
+        [int]$TimeoutSeconds = 0
     )
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -126,17 +127,82 @@ function Invoke-NativeProcessCapture {
             $process.StandardInput.Write($InputText)
             $process.StandardInput.Close()
         }
-        $process.WaitForExit()
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        if ($TimeoutSeconds -gt 0) {
+            $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $completed) {
+                try {
+                    $process.Kill()
+                } catch {
+                }
+                $process.WaitForExit()
+                [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
+                $stopwatch.Stop()
+
+                return @{
+                    ExitCode = 124
+                    StdOut = $stdoutTask.GetAwaiter().GetResult()
+                    StdErr = $stderrTask.GetAwaiter().GetResult()
+                    TimedOut = $true
+                    DurationMs = [int64]$stopwatch.ElapsedMilliseconds
+                }
+            }
+        } else {
+            $process.WaitForExit()
+        }
         [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
+        $stopwatch.Stop()
 
         return @{
             ExitCode = $process.ExitCode
             StdOut = $stdoutTask.GetAwaiter().GetResult()
             StdErr = $stderrTask.GetAwaiter().GetResult()
+            TimedOut = $false
+            DurationMs = [int64]$stopwatch.ElapsedMilliseconds
         }
     } finally {
         $process.Dispose()
     }
+}
+
+function Test-WindowsPrivateKeyPermissionWarning {
+    param(
+        [string]$LiteralPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LiteralPath)) {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $LiteralPath)) {
+        return $false
+    }
+    if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") {
+        return $false
+    }
+
+    try {
+        $acl = Get-Acl -LiteralPath $LiteralPath
+    } catch {
+        return $false
+    }
+
+    foreach ($entry in $acl.Access) {
+        $identity = [string]$entry.IdentityReference
+        $rights = [string]$entry.FileSystemRights
+        $allowsRead = $entry.AccessControlType -eq "Allow" -and (
+            $rights -match "Read" -or
+            $rights -match "FullControl" -or
+            $rights -match "Modify"
+        )
+        if (-not $allowsRead) {
+            continue
+        }
+        if ($identity -match "(?i)(Everyone|BUILTIN\\Users|Authenticated Users|Users)$") {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Read-TextFileAuto {
@@ -290,7 +356,8 @@ if ($MyInvocation.InvocationName -ne ".") {
                 "Format-OpenSshOptionAssignment",
                 "New-SshAskPassScript",
                 "ConvertTo-PosixSingleQuotedString",
-                "Resolve-KnownHostsFile"
+                "Resolve-KnownHostsFile",
+                "Test-WindowsPrivateKeyPermissionWarning"
             )
             usage = @(
                 "Dot-source from entry scripts: . .\\process-utils.ps1",
@@ -326,6 +393,7 @@ EXPORTED FUNCTIONS
   New-SshAskPassScript
   ConvertTo-PosixSingleQuotedString
   Resolve-KnownHostsFile
+  Test-WindowsPrivateKeyPermissionWarning
 "@ | Write-Output
         exit 0
     }

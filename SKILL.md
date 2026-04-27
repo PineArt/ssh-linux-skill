@@ -1,6 +1,6 @@
 ---
 name: ssh-linux
-description: SSH Linux remote operations for running commands, uploading and downloading files, selecting authentication, and requiring explicit human confirmation before high-risk actions. Use when connecting to a user-specified Linux host over SSH from Git Bash or PowerShell, including SSH key setup, SCP or SFTP style transfers, and remote inspection.
+description: SSH Linux remote operations for running commands, uploading and downloading files, selecting authentication, and requiring explicit human confirmation before high-risk actions. Use when connecting to a user-specified Linux host over SSH from Git Bash or PowerShell, including SSH key setup, SCP-style transfers, and remote inspection.
 license: MIT
 allowed-tools:
   - Bash
@@ -15,7 +15,6 @@ metadata:
     - linux
     - remote
     - scp
-    - sftp
 ---
 
 # SSH Linux
@@ -49,7 +48,9 @@ Prefer this skill when the user asks to:
 6. Use the Bash or PowerShell script that matches the local environment, but keep the same conceptual arguments and status labels.
 7. Use [references/tool-fallbacks.md](references/tool-fallbacks.md) when the remote host lacks preferred tools.
 8. Never store secrets in the repository or echo passwords into shell history.
-9. For complex remote commands with quotes, semicolons, pipes, or multiple lines, prefer `remote-exec --command-file` so the local shell does not re-parse the command text.
+9. For complex remote commands with quotes, semicolons, pipes, heredocs, shell wrappers, or multiple lines, use `remote-exec --command-file` so the local shell does not re-parse the command text.
+10. In sandboxed runtimes, CI, or environments where `$HOME` may not be the real user profile, pass an explicit `--known-hosts-file` instead of relying on automatic discovery.
+11. Treat `--timeout` as an SSH connection timeout only. Use `remote-exec --exec-timeout` when a non-interactive remote command needs a runtime limit.
 
 ## Responsibility Split
 
@@ -104,6 +105,12 @@ Expected plain-text status labels:
 - `REASON`
 - `NEXT`
 
+Additional labels may appear when relevant:
+
+- `DURATION_MS`
+- `COMMAND_FILE_SIZE`
+- `WARNING`
+
 ## Safety Policy
 
 Always stop for explicit human confirmation before:
@@ -122,6 +129,20 @@ When confirmation is required, show:
 - the affected local and remote paths,
 - the reason the action is classified as high risk.
 
+The confirmation applies only to the exact target, action, command or transfer paths, and risk reason shown to the user. Do not reuse a previous confirmation for a different host, command, path, or risk.
+
+## Standard Runbook
+
+For multi-step remote work:
+
+1. Record the session parameters: host, user, port, auth mode, identity file, known-hosts file, remote directory, and whether mutation is allowed.
+2. Start with a read-only probe such as `hostname; id; pwd; uname -a`.
+3. Probe remote tool availability before assuming `rg`, `fd`, `bat`, `python3`, `bash`, `sh`, or `systemctl` exists.
+4. Keep investigation commands read-only until a state-changing action is explicitly required.
+5. Put complex commands in a local command file and run them with `remote-exec --command-file`.
+6. For production uploads, copy to a disposable path such as `/tmp/ssh-linux-<timestamp>/...` first, verify what was uploaded, then run a separately confirmed install or move command.
+7. Summarize what changed, what failed, and whether temporary remote files remain.
+
 ## Auth Policy
 
 Use this order unless the user overrides it:
@@ -134,6 +155,14 @@ Use this order unless the user overrides it:
 6. new key generation
 
 Read the detailed rules in [references/auth-model.md](references/auth-model.md).
+
+## Known Limitations
+
+- `--timeout` maps to SSH connection timeout; remote command execution can run indefinitely unless `remote-exec --exec-timeout` is supplied.
+- File transfer uses `scp` or `pscp`. This skill does not automatically fall back to SFTP.
+- Password automation is best-effort through `SSH_ASKPASS` and a named environment variable.
+- On Windows, Git-for-Windows SSH can behave differently from system OpenSSH. Prefer the PowerShell entry points and system OpenSSH when available.
+- The script risk classifier is a conservative helper, not a security boundary. The agent layer remains responsible for semantic risk classification.
 
 ## References
 

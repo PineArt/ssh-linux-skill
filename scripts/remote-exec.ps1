@@ -1,36 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$HostName,
-
-    [string]$CommandText,
-
-    [string]$CommandFile,
-
-    [string]$UserName,
-
-    [string]$Port,
-
-    [string]$AuthMode = "ssh-alias",
-
-    [string]$IdentityFile,
-
-    [string]$KnownHostsFile,
-
-    [string]$RemoteDir,
-
-    [string]$Risk = "auto",
-
-    [string]$ConfirmationState = "none",
-
-    [string]$PasswordEnv = "SSH_PASSWORD",
-
-    [string]$Timeout = "15",
-
-    [Alias("h")]
-    [switch]$Help,
-
-    [Alias("help-json")]
-    [switch]$HelpJson
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RawArgs
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
@@ -68,6 +39,7 @@ function Get-HelpSpec {
             [ordered]@{ name = "--confirmation-state"; required = $false; value = "pending|confirmed|none"; description = "High-risk confirmation gate." },
             [ordered]@{ name = "--password-env"; required = $false; value = "VALUE"; description = "Environment variable name for password mode." },
             [ordered]@{ name = "--timeout"; required = $false; value = "VALUE"; description = "SSH connect timeout in seconds." },
+            [ordered]@{ name = "--exec-timeout"; required = $false; value = "VALUE"; description = "Remote command execution timeout in seconds. 0 means no execution timeout." },
             [ordered]@{ name = "--help|-h|-Help"; required = $false; value = ""; description = "Show human-readable help." },
             [ordered]@{ name = "--help-json|-help-json"; required = $false; value = ""; description = "Show machine-readable JSON help." }
         )
@@ -83,8 +55,9 @@ function Get-HelpSpec {
                 "ok", "invalid_arguments", "pending_confirmation", "missing_command_file",
                 "auth_tool_unavailable", "missing_key", "key_ambiguous", "missing_known_hosts",
                 "interactive_password_required", "auth_mode_unsupported", "auth_failed",
-                "connect_failed", "command_failed"
+                "connect_failed", "exec_timeout", "command_failed"
             )
+            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "WARNING")
         }
     }
 }
@@ -115,11 +88,13 @@ ARGUMENTS
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --exec-timeout VALUE
   --help | -h | -Help
   --help-json | -help-json
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -152,15 +127,129 @@ function New-RemoteScriptInputText {
     return "{0}`n{1}" -f $prefix, $ScriptText
 }
 
-$compatHelpRequested = $HostName -in @("--help", "-h", "-Help")
-$compatHelpJsonRequested = $HostName -eq "--help-json"
+$HostName = ""
+$CommandText = ""
+$CommandFile = ""
+$UserName = ""
+$Port = ""
+$AuthMode = "ssh-alias"
+$IdentityFile = ""
+$KnownHostsFile = ""
+$RemoteDir = ""
+$Risk = "auto"
+$ConfirmationState = "none"
+$PasswordEnv = "SSH_PASSWORD"
+$Timeout = "15"
+$ExecTimeout = 0
+$Help = $false
+$HelpJson = $false
 
-if ($Help -or $compatHelpRequested) {
+function Get-RequiredOptionValue {
+    param(
+        [int]$Index,
+        [string]$Name
+    )
+
+    if (($Index + 1) -ge $RawArgs.Count) {
+        Write-Status "STATUS" "invalid_arguments"
+        Write-Status "ACTION" "remote_exec"
+        Write-Status "REASON" ("missing value for {0}" -f $Name)
+        Write-Status "NEXT" "run with --help"
+        exit 2
+    }
+
+    return $RawArgs[$Index + 1]
+}
+
+$RawArgs = @($RawArgs)
+for ($i = 0; $i -lt $RawArgs.Count; $i++) {
+    $arg = [string]$RawArgs[$i]
+    switch ($arg.ToLowerInvariant()) {
+        { $_ -in @("--help", "-h", "-help") } {
+            $Help = $true
+        }
+        { $_ -in @("--help-json", "-help-json") } {
+            $HelpJson = $true
+        }
+        { $_ -in @("--host", "-host", "-hostname") } {
+            $HostName = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--command", "-command", "-commandtext") } {
+            $CommandText = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--command-file", "-command-file", "-commandfile") } {
+            $CommandFile = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--user", "-user", "-username") } {
+            $UserName = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--port", "-port") } {
+            $Port = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--auth-mode", "-auth-mode", "-authmode") } {
+            $AuthMode = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--identity-file", "-identity-file", "-identityfile") } {
+            $IdentityFile = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--known-hosts-file", "-known-hosts-file", "-knownhostsfile") } {
+            $KnownHostsFile = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--remote-dir", "-remote-dir", "-remotedir") } {
+            $RemoteDir = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--risk", "-risk") } {
+            $Risk = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--confirmation-state", "-confirmation-state", "-confirmationstate") } {
+            $ConfirmationState = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--password-env", "-password-env", "-passwordenv") } {
+            $PasswordEnv = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--timeout", "-timeout") } {
+            $Timeout = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--exec-timeout", "-exec-timeout", "-exectimeout") } {
+            $value = Get-RequiredOptionValue -Index $i -Name $arg
+            if (-not [int]::TryParse($value, [ref]$ExecTimeout) -or $ExecTimeout -lt 0) {
+                Write-Status "STATUS" "invalid_arguments"
+                Write-Status "ACTION" "remote_exec"
+                Write-Status "REASON" "--exec-timeout must be 0 or a positive integer"
+                Write-Status "NEXT" "provide a valid --exec-timeout value"
+                exit 2
+            }
+            $i++
+        }
+        default {
+            Write-Status "STATUS" "invalid_arguments"
+            Write-Status "ACTION" "remote_exec"
+            Write-Status "REASON" ("unknown argument: {0}" -f $arg)
+            Write-Status "NEXT" "run with --help"
+            exit 2
+        }
+    }
+}
+
+if ($Help) {
     Show-Usage
     exit 0
 }
 
-if ($HelpJson -or $compatHelpJsonRequested) {
+if ($HelpJson) {
     Show-HelpJson
     exit 0
 }
@@ -365,6 +454,14 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedKnownHostsFile) -and -not (Test-P
 }
 
 $isCommandFileMode = -not [string]::IsNullOrWhiteSpace($CommandFile)
+$commandFileSize = $null
+if ($isCommandFileMode) {
+    $commandFileSize = (Get-Item -LiteralPath $CommandFile).Length
+}
+$keyPermissionWarning = $false
+if ($IdentityFile) {
+    $keyPermissionWarning = Test-WindowsPrivateKeyPermissionWarning -LiteralPath $IdentityFile
+}
 
 # The caller owns remote shell quoting for CommandText. Only RemoteDir is
 # shell-escaped here because it is always treated as a path literal.
@@ -453,6 +550,9 @@ try {
     if ($isCommandFileMode) {
         $invokeParams.InputText = $remoteScriptInputText
     }
+    if ($ExecTimeout -gt 0) {
+        $invokeParams.TimeoutSeconds = $ExecTimeout
+    }
 
     $result = Invoke-NativeProcessCapture @invokeParams
 } finally {
@@ -469,6 +569,14 @@ if ($result.ExitCode -eq 0) {
     Write-Status "RISK" $Risk
     Write-Status "REASON" "remote command executed successfully"
     Write-Status "NEXT" "none"
+    Write-Status "DURATION_MS" $result.DurationMs
+    if ($isCommandFileMode) {
+        Write-Output ("COMMAND_FILE_SIZE: {0}" -f $commandFileSize)
+    }
+    if ($keyPermissionWarning) {
+        Write-Output ("WARNING: key_permissions_wide")
+        Write-Output ("NEXT_KEY_PERMISSIONS: inspect and restrict ACLs for {0}" -f $IdentityFile)
+    }
     if ($result.StdOut) {
         Write-Output "OUTPUT:"
         Write-Output $result.StdOut.TrimEnd()
@@ -481,7 +589,15 @@ if ($result.ExitCode -eq 0) {
 }
 
 $stderrText = $result.StdErr
-if ($stderrText -match 'permission denied|authentication failed') {
+if ($result.TimedOut) {
+    Write-Status "STATUS" "exec_timeout"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" ("remote command exceeded exec timeout of {0} seconds" -f $ExecTimeout)
+    Write-Status "NEXT" "rerun with a larger --exec-timeout or inspect the remote command for prompts or hangs"
+} elseif ($stderrText -match 'permission denied|authentication failed') {
     Write-Status "STATUS" "auth_failed"
     Write-Status "HOST" $target
     Write-Status "ACTION" "remote_exec"
@@ -507,6 +623,14 @@ if ($stderrText -match 'permission denied|authentication failed') {
     Write-Status "NEXT" "inspect STDERR and remote state"
 }
 
+Write-Status "DURATION_MS" $result.DurationMs
+if ($isCommandFileMode) {
+    Write-Output ("COMMAND_FILE_SIZE: {0}" -f $commandFileSize)
+}
+if ($keyPermissionWarning) {
+    Write-Output ("WARNING: key_permissions_wide")
+    Write-Output ("NEXT_KEY_PERMISSIONS: inspect and restrict ACLs for {0}" -f $IdentityFile)
+}
 if ($result.StdOut) {
     Write-Output "OUTPUT:"
     Write-Output $result.StdOut.TrimEnd()

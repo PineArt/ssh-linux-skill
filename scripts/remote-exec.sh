@@ -33,11 +33,13 @@ ARGUMENTS
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --exec-timeout VALUE
   --help | -h
   --help-json
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -49,7 +51,7 @@ EOF
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","command_failed"]}}
+{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","WARNING"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
 EOF
 }
 
@@ -66,6 +68,7 @@ risk="auto"
 confirmation_state="none"
 password_env="SSH_PASSWORD"
 timeout="15"
+exec_timeout="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -121,6 +124,10 @@ while [[ $# -gt 0 ]]; do
       timeout="${2:-}"
       shift 2
       ;;
+    --exec-timeout)
+      exec_timeout="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -157,6 +164,10 @@ if [[ -n "$command_file" ]]; then
     exit 4
   fi
   command_text="$(<"$command_file")"
+fi
+command_file_size=""
+if [[ -n "$command_file" ]]; then
+  command_file_size="$(wc -c <"$command_file" | tr -d '[:space:]')"
 fi
 
 if [[ -z "$host" || -z "$command_text" ]]; then
@@ -333,6 +344,40 @@ if [[ -n "$known_hosts_file" && ! -f "$known_hosts_file" ]]; then
   exit 5
 fi
 
+if [[ "$exec_timeout" != "0" && ! "$exec_timeout" =~ ^[0-9]+$ ]]; then
+  status STATUS invalid_arguments
+  status HOST "$target"
+  status ACTION remote_exec
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "--exec-timeout must be 0 or a positive integer"
+  status NEXT "provide a valid --exec-timeout value"
+  exit 2
+fi
+if [[ "$exec_timeout" != "0" && "$exec_timeout" -gt 0 ]] && ! command -v timeout >/dev/null 2>&1; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_exec
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "--exec-timeout requires the timeout command"
+  status NEXT "install coreutils timeout or rerun without --exec-timeout"
+  exit 4
+fi
+
+key_permission_warning="false"
+if [[ -n "$identity_file" && -f "$identity_file" ]]; then
+  if command -v stat >/dev/null 2>&1; then
+    key_mode="$(stat -c '%a' "$identity_file" 2>/dev/null || true)"
+    if [[ -n "$key_mode" ]]; then
+      group_other=$((10#$key_mode % 100))
+      if (( group_other > 0 )); then
+        key_permission_warning="true"
+      fi
+    fi
+  fi
+fi
+
 escaped_dir="${remote_dir//\'/\'\\\'\'}"
 remote_command="$command_text"
 if [[ -n "$remote_dir" ]]; then
@@ -398,6 +443,11 @@ trap cleanup EXIT
 run_ssh() {
   local remote_program=("$ssh_program" "${ssh_args[@]}")
   local remote_script_prefix=""
+  local timeout_prefix=()
+
+  if [[ "$exec_timeout" != "0" && "$exec_timeout" -gt 0 ]]; then
+    timeout_prefix=(timeout "${exec_timeout}s")
+  fi
 
   if [[ -n "$remote_dir" ]]; then
     remote_script_prefix=$(printf "cd '%s' || exit \$?\n" "$escaped_dir")
@@ -432,14 +482,14 @@ EOF
         SSH_ASKPASS="$askpass_file" \
         SSH_ASKPASS_REQUIRE=force \
         DISPLAY="${DISPLAY:-codex-ssh-linux}" \
-        "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
+        "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
     else
       env \
         SSH_LINUX_ASKPASS_SECRET="$password_value" \
         SSH_ASKPASS="$askpass_file" \
         SSH_ASKPASS_REQUIRE=force \
         DISPLAY="${DISPLAY:-codex-ssh-linux}" \
-        "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+        "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
     fi
   else
     if [[ "$is_command_file_mode" == "true" ]]; then
@@ -448,17 +498,20 @@ EOF
           printf '%s' "$remote_script_prefix"
         fi
         cat -- "$command_file"
-      } | "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
+      } | "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
     else
-      "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
+      "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
     fi
   fi
 }
 
+start_ms="$(date +%s%3N 2>/dev/null || date +%s000)"
 set +e
 run_ssh
 exit_code=$?
 set -e
+end_ms="$(date +%s%3N 2>/dev/null || date +%s000)"
+duration_ms=$((end_ms - start_ms))
 
 stderr_text="$(cat "$stderr_file" 2>/dev/null || true)"
 stdout_text="$(cat "$stdout_file" 2>/dev/null || true)"
@@ -471,6 +524,14 @@ if [[ "$exit_code" -eq 0 ]]; then
   status RISK "$risk"
   status REASON "remote command executed successfully"
   status NEXT "none"
+  status DURATION_MS "$duration_ms"
+  if [[ -n "$command_file_size" ]]; then
+    printf 'COMMAND_FILE_SIZE: %s\n' "$command_file_size"
+  fi
+  if [[ "$key_permission_warning" == "true" ]]; then
+    printf 'WARNING: key_permissions_wide\n'
+    printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
+  fi
   if [[ -n "$stdout_text" ]]; then
     printf 'OUTPUT:\n%s\n' "$stdout_text"
   fi
@@ -484,7 +545,15 @@ if [[ "$exit_code" -eq 7 ]]; then
   exit 7
 fi
 
-if grep -Eiq 'permission denied|authentication failed' <<<"$stderr_text"; then
+if [[ "$exit_code" -eq 124 && "$exec_timeout" != "0" ]]; then
+  status STATUS exec_timeout
+  status HOST "$target"
+  status ACTION remote_exec
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "remote command exceeded exec timeout of $exec_timeout seconds"
+  status NEXT "rerun with a larger --exec-timeout or inspect the remote command for prompts or hangs"
+elif grep -Eiq 'permission denied|authentication failed' <<<"$stderr_text"; then
   status STATUS auth_failed
   status HOST "$target"
   status ACTION remote_exec
@@ -510,6 +579,14 @@ else
   status NEXT "inspect STDERR and remote state"
 fi
 
+status DURATION_MS "$duration_ms"
+if [[ -n "$command_file_size" ]]; then
+  printf 'COMMAND_FILE_SIZE: %s\n' "$command_file_size"
+fi
+if [[ "$key_permission_warning" == "true" ]]; then
+  printf 'WARNING: key_permissions_wide\n'
+  printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
+fi
 if [[ -n "$stdout_text" ]]; then
   printf 'OUTPUT:\n%s\n' "$stdout_text"
 fi

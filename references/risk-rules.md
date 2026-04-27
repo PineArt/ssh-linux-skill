@@ -27,7 +27,7 @@ Scan the full requested command string, not only the first token. Include:
 - pipelines,
 - `&&`, `||`, and `;`,
 - heredocs,
-- shell wrappers such as `bash script.sh` or `python script.py`.
+- shell wrappers such as `bash script.sh` or `python script.py`,
 - full command-file contents when the command is supplied indirectly from a local file.
 
 Document variable-expansion evasion as a residual risk. If a command hides dangerous behavior behind variables or opaque scripts, classify it conservatively.
@@ -71,3 +71,9 @@ When confirmation is required, show:
 - auth mode when relevant,
 - risk reason,
 - next step waiting for user confirmation.
+
+The confirmation is bound to that exact target, action, command or transfer paths, and risk reason. A confirmation for one host, command, path, or risk does not apply to a later or different operation.
+
+For `--command-file`, show the command-file contents or a precise reviewed excerpt plus the file path before asking for confirmation. Showing only the file name is not enough.
+
+For production uploads, prefer a two-step flow: upload to a disposable path such as `/tmp/ssh-linux-<timestamp>/...`, verify it, then run a separately confirmed remote move, install, restart, or reload command.

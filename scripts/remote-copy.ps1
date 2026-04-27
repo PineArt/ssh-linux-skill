@@ -1,38 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$HostName,
-
-    [string]$Direction,
-
-    [string]$SourcePath,
-
-    [string]$TargetPath,
-
-    [string]$UserName,
-
-    [string]$Port,
-
-    [string]$AuthMode = "ssh-alias",
-
-    [string]$IdentityFile,
-
-    [string]$KnownHostsFile,
-
-    [string]$Risk = "auto",
-
-    [string]$ConfirmationState = "none",
-
-    [string]$PasswordEnv = "SSH_PASSWORD",
-
-    [string]$Timeout = "15",
-
-    [switch]$Recursive,
-
-    [Alias("h")]
-    [switch]$Help,
-
-    [Alias("help-json")]
-    [switch]$HelpJson
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RawArgs
 )
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
@@ -88,6 +57,7 @@ function Get-HelpSpec {
                 "interactive_password_required", "auth_mode_unsupported", "auth_failed",
                 "connect_failed", "transfer_failed"
             )
+            additional_labels = @("DURATION_MS", "WARNING")
         }
     }
 }
@@ -125,6 +95,7 @@ ARGUMENTS
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
   Transfer labels: DIRECTION, SOURCE, TARGET
+  Additional labels: DURATION_MS, WARNING
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -139,15 +110,121 @@ function Show-HelpJson {
     $helpSpec | ConvertTo-Json -Depth 8
 }
 
-$compatHelpRequested = $HostName -in @("--help", "-h", "-Help")
-$compatHelpJsonRequested = $HostName -eq "--help-json"
+$HostName = ""
+$Direction = ""
+$SourcePath = ""
+$TargetPath = ""
+$UserName = ""
+$Port = ""
+$AuthMode = "ssh-alias"
+$IdentityFile = ""
+$KnownHostsFile = ""
+$Risk = "auto"
+$ConfirmationState = "none"
+$PasswordEnv = "SSH_PASSWORD"
+$Timeout = "15"
+$Recursive = $false
+$Help = $false
+$HelpJson = $false
 
-if ($Help -or $compatHelpRequested) {
+function Get-RequiredOptionValue {
+    param(
+        [int]$Index,
+        [string]$Name
+    )
+
+    if (($Index + 1) -ge $RawArgs.Count) {
+        Write-Status "STATUS" "invalid_arguments"
+        Write-Status "ACTION" "remote_copy"
+        Write-Status "REASON" ("missing value for {0}" -f $Name)
+        Write-Status "NEXT" "run with --help"
+        exit 2
+    }
+
+    return $RawArgs[$Index + 1]
+}
+
+$RawArgs = @($RawArgs)
+for ($i = 0; $i -lt $RawArgs.Count; $i++) {
+    $arg = [string]$RawArgs[$i]
+    switch ($arg.ToLowerInvariant()) {
+        { $_ -in @("--help", "-h", "-help") } {
+            $Help = $true
+        }
+        { $_ -in @("--help-json", "-help-json") } {
+            $HelpJson = $true
+        }
+        { $_ -in @("--host", "-host", "-hostname") } {
+            $HostName = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--direction", "-direction") } {
+            $Direction = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--source", "-source", "-sourcepath") } {
+            $SourcePath = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--target", "-target", "-targetpath") } {
+            $TargetPath = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--user", "-user", "-username") } {
+            $UserName = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--port", "-port") } {
+            $Port = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--auth-mode", "-auth-mode", "-authmode") } {
+            $AuthMode = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--identity-file", "-identity-file", "-identityfile") } {
+            $IdentityFile = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--known-hosts-file", "-known-hosts-file", "-knownhostsfile") } {
+            $KnownHostsFile = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--risk", "-risk") } {
+            $Risk = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--confirmation-state", "-confirmation-state", "-confirmationstate") } {
+            $ConfirmationState = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--password-env", "-password-env", "-passwordenv") } {
+            $PasswordEnv = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--timeout", "-timeout") } {
+            $Timeout = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--recursive", "-recursive") } {
+            $Recursive = $true
+        }
+        default {
+            Write-Status "STATUS" "invalid_arguments"
+            Write-Status "ACTION" "remote_copy"
+            Write-Status "REASON" ("unknown argument: {0}" -f $arg)
+            Write-Status "NEXT" "run with --help"
+            exit 2
+        }
+    }
+}
+
+if ($Help) {
     Show-Usage
     exit 0
 }
 
-if ($HelpJson -or $compatHelpJsonRequested) {
+if ($HelpJson) {
     Show-HelpJson
     exit 0
 }
@@ -374,6 +451,11 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedKnownHostsFile) -and -not (Test-P
     exit 5
 }
 
+$keyPermissionWarning = $false
+if ($IdentityFile) {
+    $keyPermissionWarning = Test-WindowsPrivateKeyPermissionWarning -LiteralPath $IdentityFile
+}
+
 $sshArgs = @()
 $copyArgs = @()
 $sshProgram = ""
@@ -502,9 +584,14 @@ if ($result.ExitCode -eq 0) {
     Write-Status "RISK" $Risk
     Write-Status "REASON" "file transfer completed successfully"
     Write-Status "NEXT" "none"
+    Write-Status "DURATION_MS" $result.DurationMs
     Write-Output ("DIRECTION: {0}" -f $Direction)
     Write-Output ("SOURCE: {0}" -f $SourcePath)
     Write-Output ("TARGET: {0}" -f $TargetPath)
+    if ($keyPermissionWarning) {
+        Write-Output ("WARNING: key_permissions_wide")
+        Write-Output ("NEXT_KEY_PERMISSIONS: inspect and restrict ACLs for {0}" -f $IdentityFile)
+    }
     if ($result.StdOut) {
         Write-Output "OUTPUT:"
         Write-Output $result.StdOut.TrimEnd()
@@ -543,9 +630,14 @@ if ($stderrText -match 'permission denied|authentication failed') {
     Write-Status "NEXT" "inspect STDERR and source or target paths"
 }
 
+Write-Status "DURATION_MS" $result.DurationMs
 Write-Output ("DIRECTION: {0}" -f $Direction)
 Write-Output ("SOURCE: {0}" -f $SourcePath)
 Write-Output ("TARGET: {0}" -f $TargetPath)
+if ($keyPermissionWarning) {
+    Write-Output ("WARNING: key_permissions_wide")
+    Write-Output ("NEXT_KEY_PERMISSIONS: inspect and restrict ACLs for {0}" -f $IdentityFile)
+}
 if ($result.StdOut) {
     Write-Output "OUTPUT:"
     Write-Output $result.StdOut.TrimEnd()

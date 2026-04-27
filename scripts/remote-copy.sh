@@ -40,6 +40,7 @@ ARGUMENTS
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
   Transfer labels: DIRECTION, SOURCE, TARGET
+  Additional labels: DURATION_MS, WARNING
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -51,7 +52,7 @@ EOF
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-copy.sh","summary":"Upload or download files over SSH/SCP with auth and risk checks.","usage":["remote-copy.sh --host VALUE --direction upload|download --source VALUE --target VALUE [options]","remote-copy.sh --help","remote-copy.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--direction","required":true,"value":"upload|download","description":"Transfer direction."},{"name":"--source","required":true,"value":"VALUE","description":"Source path (local for upload, remote for download)."},{"name":"--target","required":true,"value":"VALUE","description":"Target path (remote for upload, local for download)."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies path sensitivity."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--recursive","required":false,"value":"","description":"Enable recursive copy for directories."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz","remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log","remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with transfer context and optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DIRECTION","SOURCE","TARGET"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_source","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","transfer_failed"]}}
+{"name":"remote-copy.sh","summary":"Upload or download files over SSH/SCP with auth and risk checks.","usage":["remote-copy.sh --host VALUE --direction upload|download --source VALUE --target VALUE [options]","remote-copy.sh --help","remote-copy.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--direction","required":true,"value":"upload|download","description":"Transfer direction."},{"name":"--source","required":true,"value":"VALUE","description":"Source path (local for upload, remote for download)."},{"name":"--target","required":true,"value":"VALUE","description":"Target path (remote for upload, local for download)."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies path sensitivity."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--recursive","required":false,"value":"","description":"Enable recursive copy for directories."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz","remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log","remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with transfer context and optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DIRECTION","SOURCE","TARGET","DURATION_MS","WARNING"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_source","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","transfer_failed"]}}
 EOF
 }
 
@@ -373,6 +374,19 @@ if [[ -n "$known_hosts_file" && ! -f "$known_hosts_file" ]]; then
   exit 5
 fi
 
+key_permission_warning="false"
+if [[ -n "$identity_file" && -f "$identity_file" ]]; then
+  if command -v stat >/dev/null 2>&1; then
+    key_mode="$(stat -c '%a' "$identity_file" 2>/dev/null || true)"
+    if [[ -n "$key_mode" ]]; then
+      group_other=$((10#$key_mode % 100))
+      if (( group_other > 0 )); then
+        key_permission_warning="true"
+      fi
+    fi
+  fi
+fi
+
 ssh_args=()
 copy_args=()
 ssh_program=""
@@ -445,8 +459,10 @@ maybe_precheck_remote_exists() {
   if [[ "$direction" != "upload" || "$confirmation_state" == "confirmed" ]]; then
     return 0
   fi
+  local escaped_target_path
+  escaped_target_path="${target_path//\'/\'\\\'\'}"
   set +e
-  "$ssh_program" "${ssh_args[@]}" "$target" "test -e '$target_path'" >/dev/null 2>&1
+  "$ssh_program" "${ssh_args[@]}" "$target" "test -e '$escaped_target_path'" >/dev/null 2>&1
   local exists_code=$?
   set -e
   if [[ "$exists_code" -eq 0 ]]; then
@@ -465,7 +481,6 @@ maybe_precheck_remote_exists() {
 
 run_copy() {
   local remote_spec
-  remote_spec="${target}:${target_path}"
 
   if [[ "$auth_mode" == "password" ]]; then
     password_value="${!password_env-}"
@@ -486,14 +501,18 @@ printf '%s\n' "$SSH_LINUX_ASKPASS_SECRET"
 EOF
     chmod 700 "$askpass_file"
     if [[ "$direction" == "upload" ]]; then
+      remote_spec="${target}:${target_path}"
       env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" "$copy_program" "${copy_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
     else
+      remote_spec="${target}:${source_path}"
       env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" "$copy_program" "${copy_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
     fi
   else
     if [[ "$direction" == "upload" ]]; then
+      remote_spec="${target}:${target_path}"
       "$copy_program" "${copy_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
     else
+      remote_spec="${target}:${source_path}"
       "$copy_program" "${copy_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
     fi
   fi
@@ -501,10 +520,13 @@ EOF
 
 maybe_precheck_remote_exists
 
+start_ms="$(date +%s%3N 2>/dev/null || date +%s000)"
 set +e
 run_copy
 exit_code=$?
 set -e
+end_ms="$(date +%s%3N 2>/dev/null || date +%s000)"
+duration_ms=$((end_ms - start_ms))
 
 stderr_text="$(cat "$stderr_file" 2>/dev/null || true)"
 stdout_text="$(cat "$stdout_file" 2>/dev/null || true)"
@@ -517,9 +539,14 @@ if [[ "$exit_code" -eq 0 ]]; then
   status RISK "$risk"
   status REASON "file transfer completed successfully"
   status NEXT "none"
+  status DURATION_MS "$duration_ms"
   printf 'DIRECTION: %s\n' "$direction"
   printf 'SOURCE: %s\n' "$source_path"
   printf 'TARGET: %s\n' "$target_path"
+  if [[ "$key_permission_warning" == "true" ]]; then
+    printf 'WARNING: key_permissions_wide\n'
+    printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
+  fi
   if [[ -n "$stdout_text" ]]; then
     printf 'OUTPUT:\n%s\n' "$stdout_text"
   fi
@@ -559,9 +586,14 @@ else
   status NEXT "inspect STDERR and source or target paths"
 fi
 
+status DURATION_MS "$duration_ms"
 printf 'DIRECTION: %s\n' "$direction"
 printf 'SOURCE: %s\n' "$source_path"
 printf 'TARGET: %s\n' "$target_path"
+if [[ "$key_permission_warning" == "true" ]]; then
+  printf 'WARNING: key_permissions_wide\n'
+  printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
+fi
 if [[ -n "$stdout_text" ]]; then
   printf 'OUTPUT:\n%s\n' "$stdout_text"
 fi

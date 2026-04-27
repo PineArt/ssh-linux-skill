@@ -23,6 +23,14 @@ Use when the user explicitly gives a private key path.
 
 When the local runtime is sandboxed or home-directory remapping affects host key verification, pass an explicit known-hosts path with `--known-hosts-file`.
 
+On Windows, OpenSSH may reject private keys with overly broad ACLs even when the key path is correct. The scripts may emit `WARNING: key_permissions_wide` when they can detect broadly readable key permissions. They do not change ACLs automatically. Inspect and repair the key outside the script, for example:
+
+```powershell
+icacls C:\Users\wangsong\.ssh\host_key_ed25519
+icacls C:\Users\wangsong\.ssh\host_key_ed25519 /inheritance:r
+icacls C:\Users\wangsong\.ssh\host_key_ed25519 /grant:r "$env:USERNAME:R" "SYSTEM:R" "Administrators:R"
+```
+
 ### `default-key-discovery`
 
 Probe standard keys in a fixed order:
@@ -70,6 +78,8 @@ At minimum, distinguish:
 - missing key,
 - command timeout,
 - transfer failure.
+
+If an `identity-file` run reports auth failure on Windows, check in this order: key path, key ACLs, target username, server `authorized_keys`, then server auth policy.
 
 ## Setup Scripts
 
