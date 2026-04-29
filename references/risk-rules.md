@@ -74,6 +74,6 @@ When confirmation is required, show:
 
 The confirmation is bound to that exact target, action, command or transfer paths, and risk reason. A confirmation for one host, command, path, or risk does not apply to a later or different operation.
 
-For `--command-file`, show the command-file contents or a precise reviewed excerpt plus the file path before asking for confirmation. Showing only the file name is not enough.
+For `--command-file`, show the command-file contents or a precise reviewed excerpt plus the file path before asking for confirmation. Showing only the file name is not enough. The execution helper removes Windows CRLF/CR carriage returns and a leading UTF-8 BOM before streaming the file to remote `sh -s`, so review the command semantics rather than treating local file encoding artifacts as meaningful shell syntax.
 
 For production uploads, prefer a two-step flow: upload to a disposable path such as `/tmp/ssh-linux-<timestamp>/...`, verify it, then run a separately confirmed remote move, install, restart, or reload command.

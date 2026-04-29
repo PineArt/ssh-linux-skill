@@ -28,7 +28,7 @@ function Get-HelpSpec {
         arguments = @(
             [ordered]@{ name = "--host"; required = $true; value = "VALUE"; description = "SSH host, alias, or user@host target." },
             [ordered]@{ name = "--command"; required = $false; value = "VALUE"; description = "Inline command text to execute remotely." },
-            [ordered]@{ name = "--command-file"; required = $false; value = "VALUE"; description = "Path to a local file containing remote shell script text streamed over stdin." },
+            [ordered]@{ name = "--command-file"; required = $false; value = "VALUE"; description = "Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed." },
             [ordered]@{ name = "--user"; required = $false; value = "VALUE"; description = "Username, used when host is not in user@host form." },
             [ordered]@{ name = "--port"; required = $false; value = "VALUE"; description = "SSH port." },
             [ordered]@{ name = "--auth-mode"; required = $false; value = "ssh-alias|identity-file|default-key-discovery|ssh-agent|password"; description = "Authentication strategy." },
@@ -57,7 +57,7 @@ function Get-HelpSpec {
                 "interactive_password_required", "auth_mode_unsupported", "auth_failed",
                 "connect_failed", "exec_timeout", "command_failed"
             )
-            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "WARNING")
+            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM")
         }
     }
 }
@@ -94,13 +94,16 @@ ARGUMENTS
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
   remote-exec.ps1 --host app-prod --command "uname -a"
   remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh
   remote-exec.ps1 --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
+
+NOTES
+  --command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.
 "@
 }
 
@@ -115,21 +118,93 @@ function New-RemoteScriptInputText {
         [string]$RemoteDir
     )
 
+    $normalizedScriptText = ConvertTo-RemoteScriptTransportText -ScriptText $ScriptText
     if ([string]::IsNullOrWhiteSpace($RemoteDir)) {
-        return $ScriptText
+        return $normalizedScriptText
     }
 
     $prefix = 'cd {0} || exit $?' -f (ConvertTo-PosixSingleQuotedString -Value $RemoteDir)
-    if ([string]::IsNullOrEmpty($ScriptText)) {
+    if ([string]::IsNullOrEmpty($normalizedScriptText)) {
         return $prefix + "`n"
     }
 
-    return "{0}`n{1}" -f $prefix, $ScriptText
+    return "{0}`n{1}" -f $prefix, $normalizedScriptText
+}
+
+function ConvertTo-RemoteScriptTransportText {
+    param(
+        [AllowEmptyString()]
+        [string]$ScriptText
+    )
+
+    if ($null -eq $ScriptText) {
+        return ""
+    }
+
+    # POSIX sh receives command-file content over stdin; literal CR bytes make
+    # tokens such as "--short`r" invalid on Linux, so strip carriage returns.
+    return $ScriptText.Replace("`r", "")
+}
+
+function Test-HasCarriageReturn {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    return $null -ne $Text -and $Text.Contains("`r")
+}
+
+function Write-CommandFileNormalizationWarning {
+    param(
+        [bool]$Enabled
+    )
+
+    if ($Enabled) {
+        Write-Output "WARNING: command_file_cr_normalized"
+        Write-Output "NEXT_COMMAND_FILE: carriage returns were removed before streaming --command-file content to remote sh -s"
+    }
+}
+
+function Test-HasUtf8Bom {
+    param(
+        [string]$LiteralPath
+    )
+
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        try {
+            if ($stream.Length -lt 3) {
+                return $false
+            }
+
+            $bytes = New-Object byte[] 3
+            [void]$stream.Read($bytes, 0, 3)
+            return $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Write-CommandFileBomWarning {
+    param(
+        [bool]$Enabled
+    )
+
+    if ($Enabled) {
+        Write-Output "WARNING: command_file_bom_normalized"
+        Write-Output "NEXT_COMMAND_FILE_BOM: leading UTF-8 BOM was removed before streaming --command-file content to remote sh -s"
+    }
 }
 
 $HostName = ""
 $CommandText = ""
 $CommandFile = ""
+$CommandFileHadCarriageReturns = $false
+$CommandFileHadUtf8Bom = $false
 $UserName = ""
 $Port = ""
 $AuthMode = "ssh-alias"
@@ -271,7 +346,10 @@ if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
         Write-Output ("COMMAND_FILE: {0}" -f $CommandFile)
         exit 4
     }
+    $CommandFileHadUtf8Bom = Test-HasUtf8Bom -LiteralPath $CommandFile
     $CommandText = Read-TextFileAuto -LiteralPath $CommandFile
+    $CommandFileHadCarriageReturns = Test-HasCarriageReturn -Text $CommandText
+    $CommandText = ConvertTo-RemoteScriptTransportText -ScriptText $CommandText
 }
 
 if ([string]::IsNullOrWhiteSpace($HostName) -or [string]::IsNullOrWhiteSpace($CommandText)) {
@@ -328,6 +406,8 @@ if ($Risk -eq "high" -and $ConfirmationState -ne "confirmed") {
     Write-Status "RISK" "high"
     Write-Status "REASON" "command is classified as high risk"
     Write-Status "NEXT" "obtain explicit human confirmation and rerun with --confirmation-state confirmed"
+    Write-CommandFileNormalizationWarning -Enabled $CommandFileHadCarriageReturns
+    Write-CommandFileBomWarning -Enabled $CommandFileHadUtf8Bom
     Write-Output ("COMMAND: {0}" -f $CommandText)
     exit 3
 }
@@ -577,6 +657,8 @@ if ($result.ExitCode -eq 0) {
         Write-Output ("WARNING: key_permissions_wide")
         Write-Output ("NEXT_KEY_PERMISSIONS: inspect and restrict ACLs for {0}" -f $IdentityFile)
     }
+    Write-CommandFileNormalizationWarning -Enabled $CommandFileHadCarriageReturns
+    Write-CommandFileBomWarning -Enabled $CommandFileHadUtf8Bom
     if ($result.StdOut) {
         Write-Output "OUTPUT:"
         Write-Output $result.StdOut.TrimEnd()
@@ -631,6 +713,8 @@ if ($keyPermissionWarning) {
     Write-Output ("WARNING: key_permissions_wide")
     Write-Output ("NEXT_KEY_PERMISSIONS: inspect and restrict ACLs for {0}" -f $IdentityFile)
 }
+Write-CommandFileNormalizationWarning -Enabled $CommandFileHadCarriageReturns
+Write-CommandFileBomWarning -Enabled $CommandFileHadUtf8Bom
 if ($result.StdOut) {
     Write-Output "OUTPUT:"
     Write-Output $result.StdOut.TrimEnd()

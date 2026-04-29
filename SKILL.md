@@ -48,7 +48,7 @@ Prefer this skill when the user asks to:
 6. Use the Bash or PowerShell script that matches the local environment, but keep the same conceptual arguments and status labels.
 7. Use [references/tool-fallbacks.md](references/tool-fallbacks.md) when the remote host lacks preferred tools.
 8. Never store secrets in the repository or echo passwords into shell history.
-9. For complex remote commands with quotes, semicolons, pipes, heredocs, shell wrappers, or multiple lines, use `remote-exec --command-file` so the local shell does not re-parse the command text.
+9. For complex remote commands with quotes, semicolons, pipes, heredocs, shell wrappers, or multiple lines, use `remote-exec --command-file` so the local shell does not re-parse the command text. Command-file execution streams normalized POSIX shell text to remote `sh -s`; Windows CRLF/CR carriage returns and a leading UTF-8 BOM are stripped before transport.
 10. In sandboxed runtimes, CI, or environments where `$HOME` may not be the real user profile, pass an explicit `--known-hosts-file` instead of relying on automatic discovery.
 11. Treat `--timeout` as an SSH connection timeout only. Use `remote-exec --exec-timeout` when a non-interactive remote command needs a runtime limit.
 
@@ -110,6 +110,8 @@ Additional labels may appear when relevant:
 - `DURATION_MS`
 - `COMMAND_FILE_SIZE`
 - `WARNING`
+- `NEXT_COMMAND_FILE`
+- `NEXT_COMMAND_FILE_BOM`
 
 ## Safety Policy
 
@@ -142,6 +144,8 @@ For multi-step remote work:
 5. Put complex commands in a local command file and run them with `remote-exec --command-file`.
 6. For production uploads, copy to a disposable path such as `/tmp/ssh-linux-<timestamp>/...` first, verify what was uploaded, then run a separately confirmed install or move command.
 7. Summarize what changed, what failed, and whether temporary remote files remain.
+
+Command files authored on Windows may use CRLF or carry a leading UTF-8 BOM. The helper normalizes both before streaming the file to remote `sh -s` and emits `WARNING: command_file_cr_normalized` or `WARNING: command_file_bom_normalized` when it changed the payload.
 
 ## Auth Policy
 

@@ -39,20 +39,62 @@ ARGUMENTS
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
   remote-exec.sh --host app-prod --command "uname -a"
   remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh
   remote-exec.sh --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
+
+NOTES
+  --command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.
 EOF
 }
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","WARNING"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
+{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"notes":["--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
 EOF
+}
+
+command_file_has_carriage_returns() {
+  command -v od >/dev/null 2>&1 &&
+    LC_ALL=C od -An -t x1 "$command_file" | grep -wiq '0d'
+}
+
+command_file_has_utf8_bom() {
+  command -v od >/dev/null 2>&1 &&
+    [[ "$(LC_ALL=C od -An -N3 -t x1 "$command_file" | tr -d '[:space:]')" == "efbbbf" ]]
+}
+
+stream_command_file_normalized() {
+  if command_file_has_utf8_bom; then
+    if command -v tail >/dev/null 2>&1; then
+      tail -c +4 "$command_file" | LC_ALL=C tr -d '\015'
+      return
+    fi
+    if command -v dd >/dev/null 2>&1; then
+      dd if="$command_file" bs=1 skip=3 2>/dev/null | LC_ALL=C tr -d '\015'
+      return
+    fi
+  fi
+
+  LC_ALL=C tr -d '\015' <"$command_file"
+}
+
+write_command_file_normalization_warning() {
+  if [[ "$command_file_had_carriage_returns" == "true" ]]; then
+    printf 'WARNING: command_file_cr_normalized\n'
+    printf 'NEXT_COMMAND_FILE: carriage returns were removed before streaming --command-file content to remote sh -s\n'
+  fi
+}
+
+write_command_file_bom_warning() {
+  if [[ "$command_file_had_utf8_bom" == "true" ]]; then
+    printf 'WARNING: command_file_bom_normalized\n'
+    printf 'NEXT_COMMAND_FILE_BOM: leading UTF-8 BOM was removed before streaming --command-file content to remote sh -s\n'
+  fi
 }
 
 host=""
@@ -69,6 +111,8 @@ confirmation_state="none"
 password_env="SSH_PASSWORD"
 timeout="15"
 exec_timeout="0"
+command_file_had_carriage_returns="false"
+command_file_had_utf8_bom="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -163,7 +207,13 @@ if [[ -n "$command_file" ]]; then
     printf 'COMMAND_FILE: %s\n' "$command_file"
     exit 4
   fi
-  command_text="$(<"$command_file")"
+  if command_file_has_carriage_returns; then
+    command_file_had_carriage_returns="true"
+  fi
+  if command_file_has_utf8_bom; then
+    command_file_had_utf8_bom="true"
+  fi
+  command_text="$(stream_command_file_normalized)"
 fi
 command_file_size=""
 if [[ -n "$command_file" ]]; then
@@ -219,6 +269,8 @@ if [[ "$risk" == "high" && "$confirmation_state" != "confirmed" ]]; then
   status RISK high
   status REASON "command is classified as high risk"
   status NEXT "obtain explicit human confirmation and rerun with --confirmation-state confirmed"
+  write_command_file_normalization_warning
+  write_command_file_bom_warning
   printf 'COMMAND: %s\n' "$command_text"
   exit 3
 fi
@@ -476,7 +528,7 @@ EOF
         if [[ -n "$remote_script_prefix" ]]; then
           printf '%s' "$remote_script_prefix"
         fi
-        cat -- "$command_file"
+        stream_command_file_normalized
       } | env \
         SSH_LINUX_ASKPASS_SECRET="$password_value" \
         SSH_ASKPASS="$askpass_file" \
@@ -497,7 +549,7 @@ EOF
         if [[ -n "$remote_script_prefix" ]]; then
           printf '%s' "$remote_script_prefix"
         fi
-        cat -- "$command_file"
+        stream_command_file_normalized
       } | "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
     else
       "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
@@ -532,6 +584,8 @@ if [[ "$exit_code" -eq 0 ]]; then
     printf 'WARNING: key_permissions_wide\n'
     printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
   fi
+  write_command_file_normalization_warning
+  write_command_file_bom_warning
   if [[ -n "$stdout_text" ]]; then
     printf 'OUTPUT:\n%s\n' "$stdout_text"
   fi
@@ -587,6 +641,8 @@ if [[ "$key_permission_warning" == "true" ]]; then
   printf 'WARNING: key_permissions_wide\n'
   printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
 fi
+write_command_file_normalization_warning
+write_command_file_bom_warning
 if [[ -n "$stdout_text" ]]; then
   printf 'OUTPUT:\n%s\n' "$stdout_text"
 fi
