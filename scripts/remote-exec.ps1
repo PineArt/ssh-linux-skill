@@ -270,13 +270,13 @@ function Test-NonAsciiPayloadRequiresConfirmation {
 function Test-IsDatabaseHeredocOpener {
     param([string]$Line)
 
-    return $Line -match '(^|[\s;|&])(mysql|mariadb|psql|sqlite3)([\s<]|$)'
+    return $Line -match '(^|[\s;|&])(mysql|mariadb|psql|sqlite3|sqlcmd)([\s<]|$)'
 }
 
-function Test-IsPythonHeredocOpener {
+function Test-IsInterpretedHeredocOpener {
     param([string]$Line)
 
-    return $Line -match '(^|[\s;|&])(python|python3)([\s<]|$)'
+    return $Line -match '(^|[\s;|&])(python|python3|node|ruby|perl|php|Rscript|lua|sh|bash)([\s<]|$)'
 }
 
 function Test-SqlBodyRequiresConfirmation {
@@ -291,7 +291,21 @@ function Test-SqlBodyRequiresConfirmation {
         $BodyText -match '(?i)\binto\s+(outfile|dumpfile)\b' -or
         $BodyText -match '(?im)^\s*\\'
 
-    return $hasMutatingSql -or $nonEmptyLines -gt 1 -or (Test-NonAsciiPayloadRequiresConfirmation -Metrics $nonAsciiMetrics)
+    return $hasMutatingSql -or $nonEmptyLines -gt 1 -or $nonAsciiMetrics.Bytes -gt 0
+}
+
+function Test-InterpretedBodyRequiresConfirmation {
+    param(
+        [AllowEmptyString()]
+        [string]$BodyText,
+        [int]$BodyLineCount,
+        [int]$BodyByteCount
+    )
+
+    $nonAsciiMetrics = Get-NonAsciiMetrics -Text $BodyText
+    return $nonAsciiMetrics.Bytes -gt 0 -or
+        $BodyLineCount -gt $CommandFilePythonStdinLineThreshold -or
+        $BodyByteCount -gt $CommandFilePythonStdinByteThreshold
 }
 
 function Get-CommandFileHeredocBlocks {
@@ -350,7 +364,7 @@ function Get-CommandFilePayloadWarnings {
 
     foreach ($block in (Get-CommandFileHeredocBlocks -CommandText $CommandText)) {
         $isDatabase = Test-IsDatabaseHeredocOpener -Line $block.Opener
-        $isPython = Test-IsPythonHeredocOpener -Line $block.Opener
+        $isInterpreted = Test-IsInterpretedHeredocOpener -Line $block.Opener
 
         if ($isDatabase) {
             $requiresSqlReview = Test-SqlBodyRequiresConfirmation -BodyText $block.BodyText
@@ -361,13 +375,15 @@ function Get-CommandFilePayloadWarnings {
             continue
         }
 
-        if ($isPython) {
-            $requiresPythonReview = $block.BodyLineCount -gt $CommandFilePythonStdinLineThreshold -or
-                $block.BodyByteCount -gt $CommandFilePythonStdinByteThreshold
+        if ($isInterpreted) {
+            $requiresInterpreterReview = Test-InterpretedBodyRequiresConfirmation `
+                -BodyText $block.BodyText `
+                -BodyLineCount $block.BodyLineCount `
+                -BodyByteCount $block.BodyByteCount
             $warnings += New-CommandFilePayloadWarning `
-                -Label "command_file_inline_python" `
-                -Detail ("inline Python stdin/heredoc has {0} non-empty lines and {1} UTF-8 bytes; keep control scripts short and move payloads to explicit files" -f $block.BodyLineCount, $block.BodyByteCount) `
-                -RequiresConfirmation $requiresPythonReview
+                -Label "command_file_interpreted_stdin" `
+                -Detail ("inline interpreted stdin/heredoc uses delimiter {0} with {1} non-empty lines and {2} UTF-8 bytes; keep control scripts short and move payloads to explicit files" -f $block.Delimiter, $block.BodyLineCount, $block.BodyByteCount) `
+                -RequiresConfirmation $requiresInterpreterReview
             continue
         }
 

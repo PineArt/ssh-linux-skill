@@ -144,9 +144,8 @@ non_ascii_byte_count() {
 
 sql_body_requires_confirmation() {
   local body="$1"
-  local non_empty_lines non_ascii_lines non_ascii_bytes
+  local non_empty_lines non_ascii_bytes
   non_empty_lines="$(printf '%s' "$body" | non_empty_line_count)"
-  non_ascii_lines="$(printf '%s' "$body" | non_ascii_line_count)"
   non_ascii_bytes="$(printf '%s' "$body" | non_ascii_byte_count)"
 
   if grep -Eiq '^[[:space:]]*(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|merge)\b' <<<"$body"; then
@@ -158,7 +157,23 @@ sql_body_requires_confirmation() {
   if grep -Eq '^[[:space:]]*\\' <<<"$body"; then
     return 0
   fi
-  if [[ "$non_empty_lines" -gt 1 || "$non_ascii_lines" -gt 1 || "$non_ascii_bytes" -gt "$command_file_non_ascii_byte_threshold" ]]; then
+  if [[ "$non_empty_lines" -gt 1 || "$non_ascii_bytes" -gt 0 ]]; then
+    return 0
+  fi
+  return 1
+}
+
+interpreted_body_requires_confirmation() {
+  local body="$1"
+  local body_line_count="$2"
+  local body_byte_count="$3"
+  local non_ascii_bytes
+  non_ascii_bytes="$(printf '%s' "$body" | non_ascii_byte_count)"
+
+  if [[ "$non_ascii_bytes" -gt 0 ]]; then
+    return 0
+  fi
+  if [[ "$body_line_count" -gt "$command_file_python_stdin_line_threshold" || "$body_byte_count" -gt "$command_file_python_stdin_byte_threshold" ]]; then
     return 0
   fi
   return 1
@@ -187,7 +202,7 @@ analyze_command_file_payload() {
         body_byte_count="$(printf '%s' "$body" | wc -c | tr -d '[:space:]')"
         requires_confirmation=false
 
-        if [[ "$opener" =~ (^|[[:space:]\;\|\&])(mysql|mariadb|psql|sqlite3)([[:space:]\<]|$) ]]; then
+        if [[ "$opener" =~ (^|[[:space:]\;\|\&])(mysql|mariadb|psql|sqlite3|sqlcmd)([[:space:]\<]|$) ]]; then
           if sql_body_requires_confirmation "$body"; then
             requires_confirmation=true
           fi
@@ -195,13 +210,13 @@ analyze_command_file_payload() {
             command_file_inline_sql \
             "inline database heredoc uses delimiter ${delimiter}; upload SQL payloads as UTF-8 files for reviewable execution" \
             "$requires_confirmation"
-        elif [[ "$opener" =~ (^|[[:space:]\;\|\&])(python|python3)([[:space:]\<]|$) ]]; then
-          if [[ "$body_line_count" -gt "$command_file_python_stdin_line_threshold" || "$body_byte_count" -gt "$command_file_python_stdin_byte_threshold" ]]; then
+        elif [[ "$opener" =~ (^|[[:space:]\;\|\&])(python|python3|node|ruby|perl|php|Rscript|lua|sh|bash)([[:space:]\<]|$) ]]; then
+          if interpreted_body_requires_confirmation "$body" "$body_line_count" "$body_byte_count"; then
             requires_confirmation=true
           fi
           add_command_file_payload_warning \
-            command_file_inline_python \
-            "inline Python stdin/heredoc has ${body_line_count} non-empty lines and ${body_byte_count} UTF-8 bytes; keep control scripts short and move payloads to explicit files" \
+            command_file_interpreted_stdin \
+            "inline interpreted stdin/heredoc uses delimiter ${delimiter} with ${body_line_count} non-empty lines and ${body_byte_count} UTF-8 bytes; keep control scripts short and move payloads to explicit files" \
             "$requires_confirmation"
         elif [[ "$body_line_count" -gt "$command_file_large_heredoc_line_threshold" || "$body_byte_count" -gt "$command_file_large_heredoc_byte_threshold" ]]; then
           add_command_file_payload_warning \

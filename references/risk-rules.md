@@ -85,8 +85,8 @@ The confirmation must include the payload local path and remote path when applic
 Treat `--command-file` as shell control text. The helpers warn on likely payload misuse and force high-risk confirmation before SSH execution when the command file contains any of these patterns:
 
 - a heredoc body over 20 non-empty lines or 2048 UTF-8 bytes,
-- inline database heredoc or stdin payload for `mysql`, `mariadb`, `psql`, or `sqlite3` when it is multiline, contains DDL/DML or psql meta-commands, writes through `INTO OUTFILE` or `INTO DUMPFILE`, or has non-ASCII content on multiple lines,
-- inline Python stdin or heredoc over 5 non-empty lines or 512 UTF-8 bytes,
+- inline database heredoc or stdin payload for `mysql`, `mariadb`, `psql`, `sqlite3`, or `sqlcmd` when it is multiline, contains DDL/DML or psql meta-commands, writes through `INTO OUTFILE` or `INTO DUMPFILE`, or has any non-ASCII content,
+- inline interpreted stdin or heredoc for `python`, `python3`, `node`, `ruby`, `perl`, `php`, `Rscript`, `lua`, `sh`, or `bash` when it has any non-ASCII content, or when it is over 5 non-empty lines or 512 UTF-8 bytes,
 - non-ASCII content on more than one non-empty line, or more than 64 UTF-8 bytes of non-ASCII content in the command file.
 
 Short inline UTF-8 tokens such as filenames or search patterns are allowed when the environment supports them. Payload policy warnings use `WARNING: command_file_*` plus `NEXT_COMMAND_FILE_PAYLOAD`; a triggered confirmation requirement upgrades the run to high risk even if `--risk low` was supplied.

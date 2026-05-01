@@ -117,12 +117,34 @@ try {
         }
 
     Assert-PolicyCase `
-        -Name "short-python" `
+        -Name "read-only-sql-non-ascii" `
+        -Body "psql app <<'SQL'`nselect '张三';`nSQL`n" `
+        -Assert {
+            param($Result, $Label)
+            Assert-True ($Result.ExitCode -eq 3) "$Label should require confirmation for read-only SQL with non-ASCII stdin."
+            Assert-True ($Result.Output -match 'WARNING: command_file_inline_sql') "$Label should emit inline SQL warning."
+            Assert-True ($Result.Output -match 'RISK: high') "$Label should upgrade non-ASCII SQL stdin risk to high."
+        }
+
+    Assert-PolicyCase `
+        -Name "short-interpreter-ascii" `
         -Body "python3 - <<'PY'`nprint('ok')`nPY`n" `
         -Assert {
             param($Result, $Label)
-            Assert-True ($Result.ExitCode -ne 3) "$Label should not require confirmation for short Python stdin control script."
-            Assert-True ($Result.Output -match 'WARNING: command_file_inline_python') "$Label should warn for inline Python stdin."
+            Assert-True ($Result.ExitCode -ne 3) "$Label should not require confirmation for short ASCII interpreter stdin control script."
+            Assert-True ($Result.Output -match 'WARNING: command_file_interpreted_stdin') "$Label should warn for inline interpreter stdin."
+        }
+
+    foreach ($interpreter in @("python3", "node", "ruby", "bash", "perl")) {
+        Assert-PolicyCase `
+            -Name ("interpreter-non-ascii-" + $interpreter) `
+            -Body "$interpreter <<'EOF'`nprintf '中文'`nEOF`n" `
+            -Assert {
+                param($Result, $Label)
+                Assert-True ($Result.ExitCode -eq 3) "$Label should require confirmation for interpreter stdin with non-ASCII."
+                Assert-True ($Result.Output -match 'WARNING: command_file_interpreted_stdin') "$Label should emit interpreted stdin warning."
+                Assert-True ($Result.Output -match 'RISK: high') "$Label should upgrade non-ASCII interpreter stdin risk to high."
+            }
         }
 
     $largeHeredocLines = 1..21 | ForEach-Object { "line $_" }
@@ -142,7 +164,26 @@ try {
         -Body $nestedLikeBody `
         -Assert {
             param($Result, $Label)
-            Assert-True ($Result.Output -notmatch 'command_file_inline_sql|command_file_inline_python|command_file_large_heredoc') "$Label should not parse heredoc-like body text as a second heredoc."
+            Assert-True ($Result.Output -notmatch 'command_file_inline_sql|command_file_interpreted_stdin|command_file_large_heredoc') "$Label should not parse heredoc-like body text as a second heredoc."
+        }
+
+    Assert-PolicyCase `
+        -Name "kubectl-apply-non-ascii-yaml" `
+        -Body "kubectl apply -f - <<'YAML'`nmetadata: {name: 中文}`nYAML`n" `
+        -Assert {
+            param($Result, $Label)
+            Assert-True ($Result.ExitCode -ne 3) "$Label should not hard-block kubectl stdin with a small non-ASCII YAML token."
+            Assert-True ($Result.Output -notmatch 'command_file_interpreted_stdin|command_file_large_heredoc|command_file_non_ascii_payload') "$Label should not emit interpreter, large heredoc, or whole-file non-ASCII warnings."
+        }
+
+    Assert-PolicyCase `
+        -Name "multi-heredoc-scoping" `
+        -Body "python3 <<'PY'`nprint('中文')`nPY`ncat <<'TXT' >/tmp/msg.txt`n中文`nTXT`n" `
+        -Assert {
+            param($Result, $Label)
+            Assert-True ($Result.ExitCode -eq 3) "$Label should block for the interpreter heredoc."
+            Assert-True ($Result.Output -match 'WARNING: command_file_interpreted_stdin') "$Label should emit interpreted stdin warning."
+            Assert-True ($Result.Output -notmatch 'WARNING: command_file_large_heredoc') "$Label should not add a large-heredoc warning for a small plain cat heredoc."
         }
 
     Assert-PolicyCase `
