@@ -15,6 +15,12 @@ function Write-Status {
     Write-Output ("{0}: {1}" -f $Name, $Value)
 }
 
+$CommandFileLargeHeredocLineThreshold = 20
+$CommandFileLargeHeredocByteThreshold = 2048
+$CommandFilePythonStdinLineThreshold = 5
+$CommandFilePythonStdinByteThreshold = 512
+$CommandFileNonAsciiByteThreshold = 64
+
 function Get-HelpSpec {
     return [ordered]@{
         name = "remote-exec.ps1"
@@ -57,7 +63,7 @@ function Get-HelpSpec {
                 "interactive_password_required", "auth_mode_unsupported", "auth_failed",
                 "connect_failed", "exec_timeout", "command_failed"
             )
-            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM")
+            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM", "NEXT_COMMAND_FILE_PAYLOAD")
         }
     }
 }
@@ -94,7 +100,7 @@ ARGUMENTS
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -200,11 +206,208 @@ function Write-CommandFileBomWarning {
     }
 }
 
+function New-CommandFilePayloadWarning {
+    param(
+        [string]$Label,
+        [string]$Detail,
+        [bool]$RequiresConfirmation
+    )
+
+    return [pscustomobject]@{
+        Label = $Label
+        Detail = $Detail
+        RequiresConfirmation = $RequiresConfirmation
+    }
+}
+
+function Get-NonEmptyLineCount {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    return @(($Text -split "`n", -1) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+}
+
+function Get-NonAsciiMetrics {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    $nonAsciiLines = 0
+    $nonAsciiTextBuilder = [System.Text.StringBuilder]::new()
+    foreach ($line in ($Text -split "`n", -1)) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        if ($line -match '[^\x00-\x7F]') {
+            $nonAsciiLines++
+        }
+
+        foreach ($char in $line.ToCharArray()) {
+            if ([int][char]$char -gt 127) {
+                [void]$nonAsciiTextBuilder.Append($char)
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Lines = $nonAsciiLines
+        Bytes = [System.Text.Encoding]::UTF8.GetByteCount($nonAsciiTextBuilder.ToString())
+    }
+}
+
+function Test-NonAsciiPayloadRequiresConfirmation {
+    param(
+        [pscustomobject]$Metrics
+    )
+
+    return $Metrics.Lines -gt 1 -or $Metrics.Bytes -gt $CommandFileNonAsciiByteThreshold
+}
+
+function Test-IsDatabaseHeredocOpener {
+    param([string]$Line)
+
+    return $Line -match '(^|[\s;|&])(mysql|mariadb|psql|sqlite3)([\s<]|$)'
+}
+
+function Test-IsPythonHeredocOpener {
+    param([string]$Line)
+
+    return $Line -match '(^|[\s;|&])(python|python3)([\s<]|$)'
+}
+
+function Test-SqlBodyRequiresConfirmation {
+    param(
+        [AllowEmptyString()]
+        [string]$BodyText
+    )
+
+    $nonEmptyLines = Get-NonEmptyLineCount -Text $BodyText
+    $nonAsciiMetrics = Get-NonAsciiMetrics -Text $BodyText
+    $hasMutatingSql = $BodyText -match '(?im)^\s*(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|merge)\b' -or
+        $BodyText -match '(?i)\binto\s+(outfile|dumpfile)\b' -or
+        $BodyText -match '(?im)^\s*\\'
+
+    return $hasMutatingSql -or $nonEmptyLines -gt 1 -or (Test-NonAsciiPayloadRequiresConfirmation -Metrics $nonAsciiMetrics)
+}
+
+function Get-CommandFileHeredocBlocks {
+    param(
+        [AllowEmptyString()]
+        [string]$CommandText
+    )
+
+    $blocks = @()
+    $lines = @($CommandText -split "`n", -1)
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -notmatch '<<-?\s*(?:''([^'']+)''|"([^"]+)"|([^\s;|&]+))') {
+            continue
+        }
+
+        $delimiter = if ($Matches[1]) { $Matches[1] } elseif ($Matches[2]) { $Matches[2] } else { $Matches[3] }
+        $bodyLines = @()
+        $j = $i + 1
+        while ($j -lt $lines.Count) {
+            if ($lines[$j].Trim() -eq $delimiter) {
+                break
+            }
+            $bodyLines += $lines[$j]
+            $j++
+        }
+
+        $bodyText = $bodyLines -join "`n"
+        $blocks += [pscustomobject]@{
+            Opener = $line
+            Delimiter = $delimiter
+            BodyText = $bodyText
+            BodyLineCount = (Get-NonEmptyLineCount -Text $bodyText)
+            BodyByteCount = [System.Text.Encoding]::UTF8.GetByteCount($bodyText)
+        }
+        $i = $j
+    }
+
+    return @($blocks)
+}
+
+function Get-CommandFilePayloadWarnings {
+    param(
+        [AllowEmptyString()]
+        [string]$CommandText
+    )
+
+    $warnings = @()
+    $metrics = Get-NonAsciiMetrics -Text $CommandText
+    if (Test-NonAsciiPayloadRequiresConfirmation -Metrics $metrics) {
+        $warnings += New-CommandFilePayloadWarning `
+            -Label "command_file_non_ascii_payload" `
+            -Detail ("non-ASCII content appears on {0} non-empty lines ({1} UTF-8 bytes); move non-trivial payload data to a UTF-8 file and pass its path" -f $metrics.Lines, $metrics.Bytes) `
+            -RequiresConfirmation $true
+    }
+
+    foreach ($block in (Get-CommandFileHeredocBlocks -CommandText $CommandText)) {
+        $isDatabase = Test-IsDatabaseHeredocOpener -Line $block.Opener
+        $isPython = Test-IsPythonHeredocOpener -Line $block.Opener
+
+        if ($isDatabase) {
+            $requiresSqlReview = Test-SqlBodyRequiresConfirmation -BodyText $block.BodyText
+            $warnings += New-CommandFilePayloadWarning `
+                -Label "command_file_inline_sql" `
+                -Detail ("inline database heredoc uses delimiter {0}; upload SQL payloads as UTF-8 files for reviewable execution" -f $block.Delimiter) `
+                -RequiresConfirmation $requiresSqlReview
+            continue
+        }
+
+        if ($isPython) {
+            $requiresPythonReview = $block.BodyLineCount -gt $CommandFilePythonStdinLineThreshold -or
+                $block.BodyByteCount -gt $CommandFilePythonStdinByteThreshold
+            $warnings += New-CommandFilePayloadWarning `
+                -Label "command_file_inline_python" `
+                -Detail ("inline Python stdin/heredoc has {0} non-empty lines and {1} UTF-8 bytes; keep control scripts short and move payloads to explicit files" -f $block.BodyLineCount, $block.BodyByteCount) `
+                -RequiresConfirmation $requiresPythonReview
+            continue
+        }
+
+        if ($block.BodyLineCount -gt $CommandFileLargeHeredocLineThreshold -or $block.BodyByteCount -gt $CommandFileLargeHeredocByteThreshold) {
+            $warnings += New-CommandFilePayloadWarning `
+                -Label "command_file_large_heredoc" `
+                -Detail ("large heredoc uses delimiter {0} with {1} non-empty lines and {2} UTF-8 bytes; review whether this is payload data that should be transferred separately" -f $block.Delimiter, $block.BodyLineCount, $block.BodyByteCount) `
+                -RequiresConfirmation $true
+        }
+    }
+
+    return @($warnings)
+}
+
+function Test-CommandFilePayloadRequiresConfirmation {
+    param(
+        [object[]]$Warnings
+    )
+
+    return @($Warnings | Where-Object { $_.RequiresConfirmation }).Count -gt 0
+}
+
+function Write-CommandFilePayloadWarnings {
+    param(
+        [object[]]$Warnings
+    )
+
+    foreach ($warning in @($Warnings)) {
+        Write-Output ("WARNING: {0}" -f $warning.Label)
+        Write-Output ("NEXT_COMMAND_FILE_PAYLOAD: {0}" -f $warning.Detail)
+    }
+}
+
 $HostName = ""
 $CommandText = ""
 $CommandFile = ""
 $CommandFileHadCarriageReturns = $false
 $CommandFileHadUtf8Bom = $false
+$CommandFilePayloadWarnings = @()
+$CommandFilePayloadRequiresConfirmation = $false
 $UserName = ""
 $Port = ""
 $AuthMode = "ssh-alias"
@@ -350,6 +553,8 @@ if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
     $CommandText = Read-TextFileAuto -LiteralPath $CommandFile
     $CommandFileHadCarriageReturns = Test-HasCarriageReturn -Text $CommandText
     $CommandText = ConvertTo-RemoteScriptTransportText -ScriptText $CommandText
+    $CommandFilePayloadWarnings = Get-CommandFilePayloadWarnings -CommandText $CommandText
+    $CommandFilePayloadRequiresConfirmation = Test-CommandFilePayloadRequiresConfirmation -Warnings $CommandFilePayloadWarnings
 }
 
 if ([string]::IsNullOrWhiteSpace($HostName) -or [string]::IsNullOrWhiteSpace($CommandText)) {
@@ -378,7 +583,9 @@ function Test-HighRiskCommand {
         'nft',
         'crontab\s+-r',
         '(^|[^>])>>?\s*(/etc|/usr|/bin|/sbin|/opt|/var/www)',
-        '(^|[\s;|&])(bash|sh|python|python3)\s+\S+'
+        '(^|[\s;|&])(bash|sh)\s+\S+',
+        '(^|[\s;|&])(python|python3)\s+(?!-|<)\S+',
+        '(^|[\s;|&])(python|python3)\s+-m\s+\S+'
     )
     foreach ($pattern in $patterns) {
         if ($CommandText -match $pattern) {
@@ -394,7 +601,9 @@ function Test-HighRiskCommand {
     return $false
 }
 
-if ($Risk -eq "auto") {
+if ($CommandFilePayloadRequiresConfirmation) {
+    $Risk = "high"
+} elseif ($Risk -eq "auto") {
     $Risk = if (Test-HighRiskCommand -CommandText $CommandText) { "high" } else { "low" }
 }
 
@@ -408,6 +617,7 @@ if ($Risk -eq "high" -and $ConfirmationState -ne "confirmed") {
     Write-Status "NEXT" "obtain explicit human confirmation and rerun with --confirmation-state confirmed"
     Write-CommandFileNormalizationWarning -Enabled $CommandFileHadCarriageReturns
     Write-CommandFileBomWarning -Enabled $CommandFileHadUtf8Bom
+    Write-CommandFilePayloadWarnings -Warnings $CommandFilePayloadWarnings
     Write-Output ("COMMAND: {0}" -f $CommandText)
     exit 3
 }
@@ -659,6 +869,7 @@ if ($result.ExitCode -eq 0) {
     }
     Write-CommandFileNormalizationWarning -Enabled $CommandFileHadCarriageReturns
     Write-CommandFileBomWarning -Enabled $CommandFileHadUtf8Bom
+    Write-CommandFilePayloadWarnings -Warnings $CommandFilePayloadWarnings
     if ($result.StdOut) {
         Write-Output "OUTPUT:"
         Write-Output $result.StdOut.TrimEnd()
@@ -715,6 +926,7 @@ if ($keyPermissionWarning) {
 }
 Write-CommandFileNormalizationWarning -Enabled $CommandFileHadCarriageReturns
 Write-CommandFileBomWarning -Enabled $CommandFileHadUtf8Bom
+Write-CommandFilePayloadWarnings -Warnings $CommandFilePayloadWarnings
 if ($result.StdOut) {
     Write-Output "OUTPUT:"
     Write-Output $result.StdOut.TrimEnd()

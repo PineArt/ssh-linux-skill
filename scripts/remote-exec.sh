@@ -7,6 +7,15 @@ status() {
   printf '%s: %s\n' "$1" "$2"
 }
 
+command_file_large_heredoc_line_threshold=20
+command_file_large_heredoc_byte_threshold=2048
+command_file_python_stdin_line_threshold=5
+command_file_python_stdin_byte_threshold=512
+command_file_non_ascii_byte_threshold=64
+command_file_payload_warning_labels=()
+command_file_payload_warning_details=()
+command_file_payload_warning_requires_confirmation=()
+
 usage() {
   cat <<'EOF'
 remote-exec.sh
@@ -39,7 +48,7 @@ ARGUMENTS
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -54,7 +63,7 @@ EOF
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"notes":["--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
+{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"notes":["--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM","NEXT_COMMAND_FILE_PAYLOAD"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
 EOF
 }
 
@@ -95,6 +104,143 @@ write_command_file_bom_warning() {
     printf 'WARNING: command_file_bom_normalized\n'
     printf 'NEXT_COMMAND_FILE_BOM: leading UTF-8 BOM was removed before streaming --command-file content to remote sh -s\n'
   fi
+}
+
+add_command_file_payload_warning() {
+  command_file_payload_warning_labels+=("$1")
+  command_file_payload_warning_details+=("$2")
+  command_file_payload_warning_requires_confirmation+=("$3")
+}
+
+write_command_file_payload_warnings() {
+  local index
+  for index in "${!command_file_payload_warning_labels[@]}"; do
+    printf 'WARNING: %s\n' "${command_file_payload_warning_labels[$index]}"
+    printf 'NEXT_COMMAND_FILE_PAYLOAD: %s\n' "${command_file_payload_warning_details[$index]}"
+  done
+}
+
+command_file_payload_requires_confirmation() {
+  local value
+  for value in "${command_file_payload_warning_requires_confirmation[@]}"; do
+    if [[ "$value" == "true" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+non_empty_line_count() {
+  awk 'NF { count++ } END { print count + 0 }'
+}
+
+non_ascii_line_count() {
+  LC_ALL=C awk 'NF && /[^\000-\177]/ { count++ } END { print count + 0 }'
+}
+
+non_ascii_byte_count() {
+  LC_ALL=C tr -cd '\200-\377' | wc -c | tr -d '[:space:]'
+}
+
+sql_body_requires_confirmation() {
+  local body="$1"
+  local non_empty_lines non_ascii_lines non_ascii_bytes
+  non_empty_lines="$(printf '%s' "$body" | non_empty_line_count)"
+  non_ascii_lines="$(printf '%s' "$body" | non_ascii_line_count)"
+  non_ascii_bytes="$(printf '%s' "$body" | non_ascii_byte_count)"
+
+  if grep -Eiq '^[[:space:]]*(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|merge)\b' <<<"$body"; then
+    return 0
+  fi
+  if grep -Eiq '\binto[[:space:]]+(outfile|dumpfile)\b' <<<"$body"; then
+    return 0
+  fi
+  if grep -Eq '^[[:space:]]*\\' <<<"$body"; then
+    return 0
+  fi
+  if [[ "$non_empty_lines" -gt 1 || "$non_ascii_lines" -gt 1 || "$non_ascii_bytes" -gt "$command_file_non_ascii_byte_threshold" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+analyze_command_file_payload() {
+  local text="$1"
+  local non_ascii_lines non_ascii_bytes
+  non_ascii_lines="$(printf '%s' "$text" | non_ascii_line_count)"
+  non_ascii_bytes="$(printf '%s' "$text" | non_ascii_byte_count)"
+
+  if [[ "$non_ascii_lines" -gt 1 || "$non_ascii_bytes" -gt "$command_file_non_ascii_byte_threshold" ]]; then
+    add_command_file_payload_warning \
+      command_file_non_ascii_payload \
+      "non-ASCII content appears on ${non_ascii_lines} non-empty lines (${non_ascii_bytes} UTF-8 bytes); move non-trivial payload data to a UTF-8 file and pass its path" \
+      true
+  fi
+
+  local in_heredoc=false
+  local opener="" delimiter="" body=""
+  local line body_line_count body_byte_count requires_confirmation
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$in_heredoc" == "true" ]]; then
+      if [[ "${line#"${line%%[![:space:]]*}"}" == "$delimiter" ]]; then
+        body_line_count="$(printf '%s' "$body" | non_empty_line_count)"
+        body_byte_count="$(printf '%s' "$body" | wc -c | tr -d '[:space:]')"
+        requires_confirmation=false
+
+        if [[ "$opener" =~ (^|[[:space:]\;\|\&])(mysql|mariadb|psql|sqlite3)([[:space:]\<]|$) ]]; then
+          if sql_body_requires_confirmation "$body"; then
+            requires_confirmation=true
+          fi
+          add_command_file_payload_warning \
+            command_file_inline_sql \
+            "inline database heredoc uses delimiter ${delimiter}; upload SQL payloads as UTF-8 files for reviewable execution" \
+            "$requires_confirmation"
+        elif [[ "$opener" =~ (^|[[:space:]\;\|\&])(python|python3)([[:space:]\<]|$) ]]; then
+          if [[ "$body_line_count" -gt "$command_file_python_stdin_line_threshold" || "$body_byte_count" -gt "$command_file_python_stdin_byte_threshold" ]]; then
+            requires_confirmation=true
+          fi
+          add_command_file_payload_warning \
+            command_file_inline_python \
+            "inline Python stdin/heredoc has ${body_line_count} non-empty lines and ${body_byte_count} UTF-8 bytes; keep control scripts short and move payloads to explicit files" \
+            "$requires_confirmation"
+        elif [[ "$body_line_count" -gt "$command_file_large_heredoc_line_threshold" || "$body_byte_count" -gt "$command_file_large_heredoc_byte_threshold" ]]; then
+          add_command_file_payload_warning \
+            command_file_large_heredoc \
+            "large heredoc uses delimiter ${delimiter} with ${body_line_count} non-empty lines and ${body_byte_count} UTF-8 bytes; review whether this is payload data that should be transferred separately" \
+            true
+        fi
+
+        in_heredoc=false
+        opener=""
+        delimiter=""
+        body=""
+        continue
+      fi
+      if [[ -z "$body" ]]; then
+        body="$line"
+      else
+        body+=$'\n'"$line"
+      fi
+      continue
+    fi
+
+    if [[ "$line" =~ \<\<-?[[:space:]]*\'([^\']+)\' ]]; then
+      in_heredoc=true
+      opener="$line"
+      delimiter="${BASH_REMATCH[1]}"
+      body=""
+    elif [[ "$line" =~ \<\<-?[[:space:]]*\"([^\"]+)\" ]]; then
+      in_heredoc=true
+      opener="$line"
+      delimiter="${BASH_REMATCH[1]}"
+      body=""
+    elif [[ "$line" =~ \<\<-?[[:space:]]*([^[:space:]\;\|\&]+) ]]; then
+      in_heredoc=true
+      opener="$line"
+      delimiter="${BASH_REMATCH[1]}"
+      body=""
+    fi
+  done <<<"$text"
 }
 
 host=""
@@ -214,6 +360,7 @@ if [[ -n "$command_file" ]]; then
     command_file_had_utf8_bom="true"
   fi
   command_text="$(stream_command_file_normalized)"
+  analyze_command_file_payload "$command_text"
 fi
 command_file_size=""
 if [[ -n "$command_file" ]]; then
@@ -247,18 +394,25 @@ is_high_risk() {
   if grep -Eiq '(^|[^>])>>?[[:space:]]*(/etc|/usr|/bin|/sbin|/opt|/var/www)' <<<"$value"; then
     return 0
   fi
-  if grep -Eiq '(^|[[:space:];|&])(bash|sh|python|python3)[[:space:]]+[^[:space:]]+' <<<"$value"; then
+  if grep -Eiq '(^|[[:space:];|&])(bash|sh)[[:space:]]+[^[:space:]]+' <<<"$value"; then
+    return 0
+  fi
+  if grep -Eiq '(^|[[:space:];|&])(python|python3)[[:space:]]+(-m[[:space:]]+)?[^[:space:]<-][^[:space:]]*' <<<"$value"; then
     return 0
   fi
   return 1
 }
 
 if [[ "$risk" == "auto" ]]; then
-  if is_high_risk "$command_text"; then
+  if command_file_payload_requires_confirmation; then
+    risk="high"
+  elif is_high_risk "$command_text"; then
     risk="high"
   else
     risk="low"
   fi
+elif command_file_payload_requires_confirmation; then
+  risk="high"
 fi
 
 if [[ "$risk" == "high" && "$confirmation_state" != "confirmed" ]]; then
@@ -271,6 +425,7 @@ if [[ "$risk" == "high" && "$confirmation_state" != "confirmed" ]]; then
   status NEXT "obtain explicit human confirmation and rerun with --confirmation-state confirmed"
   write_command_file_normalization_warning
   write_command_file_bom_warning
+  write_command_file_payload_warnings
   printf 'COMMAND: %s\n' "$command_text"
   exit 3
 fi
@@ -586,6 +741,7 @@ if [[ "$exit_code" -eq 0 ]]; then
   fi
   write_command_file_normalization_warning
   write_command_file_bom_warning
+  write_command_file_payload_warnings
   if [[ -n "$stdout_text" ]]; then
     printf 'OUTPUT:\n%s\n' "$stdout_text"
   fi
@@ -643,6 +799,7 @@ if [[ "$key_permission_warning" == "true" ]]; then
 fi
 write_command_file_normalization_warning
 write_command_file_bom_warning
+write_command_file_payload_warnings
 if [[ -n "$stdout_text" ]]; then
   printf 'OUTPUT:\n%s\n' "$stdout_text"
 fi

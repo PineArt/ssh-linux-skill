@@ -49,8 +49,9 @@ Prefer this skill when the user asks to:
 7. Use [references/tool-fallbacks.md](references/tool-fallbacks.md) when the remote host lacks preferred tools.
 8. Never store secrets in the repository or echo passwords into shell history.
 9. For complex remote commands with quotes, semicolons, pipes, heredocs, shell wrappers, or multiple lines, use `remote-exec --command-file` so the local shell does not re-parse the command text. Command-file execution streams normalized POSIX shell text to remote `sh -s`; Windows CRLF/CR carriage returns and a leading UTF-8 BOM are stripped before transport.
-10. In sandboxed runtimes, CI, or environments where `$HOME` may not be the real user profile, pass an explicit `--known-hosts-file` instead of relying on automatic discovery.
-11. Treat `--timeout` as an SSH connection timeout only. Use `remote-exec --exec-timeout` when a non-interactive remote command needs a runtime limit.
+10. Treat `--command` and `--command-file` as shell control text channels, not general application payload channels. Short inline UTF-8 tokens such as filenames or search patterns can stay in command text when the environment supports them. For non-trivial business payloads such as SQL, JSON, YAML, Markdown, prompts, CSV, config fragments, or other data with locale-specific or non-ASCII content, prefer `remote-copy` to upload a UTF-8 file, verify the uploaded path, then reference that path from the command. Payload producers and receivers must specify encoding explicitly, defaulting to UTF-8 and avoiding platform defaults. Use a base64 envelope only when file transfer is not practical, and decode it explicitly at the receiver.
+11. In sandboxed runtimes, CI, or environments where `$HOME` may not be the real user profile, pass an explicit `--known-hosts-file` instead of relying on automatic discovery.
+12. Treat `--timeout` as an SSH connection timeout only. Use `remote-exec --exec-timeout` when a non-interactive remote command needs a runtime limit.
 
 ## Responsibility Split
 
@@ -112,6 +113,7 @@ Additional labels may appear when relevant:
 - `WARNING`
 - `NEXT_COMMAND_FILE`
 - `NEXT_COMMAND_FILE_BOM`
+- `NEXT_COMMAND_FILE_PAYLOAD`
 
 ## Safety Policy
 
@@ -142,10 +144,11 @@ For multi-step remote work:
 3. Probe remote tool availability before assuming `rg`, `fd`, `bat`, `python3`, `bash`, `sh`, or `systemctl` exists.
 4. Keep investigation commands read-only until a state-changing action is explicitly required.
 5. Put complex commands in a local command file and run them with `remote-exec --command-file`.
-6. For production uploads, copy to a disposable path such as `/tmp/ssh-linux-<timestamp>/...` first, verify what was uploaded, then run a separately confirmed install or move command.
-7. Summarize what changed, what failed, and whether temporary remote files remain.
+6. Keep payload data out of command files when it is non-trivial, encoding-sensitive, or reused by an application. Upload the payload with `remote-copy`, verify the remote path, size, and when useful a hash, and have the remote command pass the file path to the application. Create, read, and decode payload content with explicit encoding at every producer and receiver boundary. For example, a Python receiver should read the file with `encoding="utf-8"` instead of relying on the platform default.
+7. For production uploads, copy to a disposable path such as `/tmp/ssh-linux-<timestamp>/...` first, verify what was uploaded, then run a separately confirmed install or move command.
+8. Summarize what changed, what failed, and whether temporary remote files remain.
 
-Command files authored on Windows may use CRLF or carry a leading UTF-8 BOM. The helper normalizes both before streaming the file to remote `sh -s` and emits `WARNING: command_file_cr_normalized` or `WARNING: command_file_bom_normalized` when it changed the payload.
+Command files authored on Windows may use CRLF or carry a leading UTF-8 BOM. The helper normalizes both before streaming the file to remote `sh -s` and emits `WARNING: command_file_cr_normalized` or `WARNING: command_file_bom_normalized` when it changed the shell text. This normalization is not a general payload transport feature; data payloads should be transferred and decoded as data.
 
 ## Auth Policy
 
