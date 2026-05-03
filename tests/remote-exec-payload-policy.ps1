@@ -43,6 +43,32 @@ function Invoke-PowerShellEntry {
     }
 }
 
+function Invoke-PowerShellStdinEntry {
+    param(
+        [string]$CommandText,
+        [string[]]$ExtraArgs = @()
+    )
+
+    $outputLines = $CommandText | & $psEntry --host example.invalid --command-stdin @ExtraArgs 2>&1
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output = ($outputLines -join "`n")
+    }
+}
+
+function Invoke-PowerShellCommandEntry {
+    param(
+        [string]$CommandText,
+        [string[]]$ExtraArgs = @()
+    )
+
+    $outputLines = & $psEntry --host example.invalid --command $CommandText @ExtraArgs 2>&1
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output = ($outputLines -join "`n")
+    }
+}
+
 function Invoke-BashEntry {
     param(
         [string]$BashPath,
@@ -51,6 +77,30 @@ function Invoke-BashEntry {
     )
 
     $outputLines = & $BashPath -- (ConvertTo-GitBashPath $shEntry) --host example.invalid --command-file (ConvertTo-GitBashPath $CommandFile) @ExtraArgs 2>&1
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output = ($outputLines -join "`n")
+    }
+}
+
+function Invoke-BashStdinEntry {
+    param(
+        [string]$BashPath,
+        [string]$CommandText,
+        [string[]]$ExtraArgs = @()
+    )
+
+    $stdinFile = Join-Path $tempDir ("stdin-" + [System.Guid]::NewGuid().ToString("N") + ".sh")
+    [System.IO.File]::WriteAllText($stdinFile, $CommandText, [System.Text.UTF8Encoding]::new($false))
+    $commandArgs = @(
+        (ConvertTo-GitBashPath $shEntry),
+        "--host",
+        "example.invalid",
+        "--command-stdin"
+    ) + @($ExtraArgs)
+    $argText = ($commandArgs | ForEach-Object { "'" + ([string]$_).Replace("'", "'\''") + "'" }) -join " "
+    $bashCommand = "cat '" + (ConvertTo-GitBashPath $stdinFile).Replace("'", "'\''") + "' | " + $argText
+    $outputLines = & $BashPath -lc $bashCommand 2>&1
     return [pscustomobject]@{
         ExitCode = $LASTEXITCODE
         Output = ($outputLines -join "`n")
@@ -77,6 +127,23 @@ function Assert-PolicyCase {
     }
 }
 
+function Assert-StdinPolicyCase {
+    param(
+        [string]$Name,
+        [string]$Body,
+        [scriptblock]$Assert,
+        [string[]]$ExtraArgs = @("--risk", "low")
+    )
+
+    $psResult = Invoke-PowerShellStdinEntry -CommandText $Body -ExtraArgs $ExtraArgs
+    & $Assert $psResult "PowerShell stdin $Name"
+
+    if ($script:bash) {
+        $shResult = Invoke-BashStdinEntry -BashPath $script:bash -CommandText $Body -ExtraArgs $ExtraArgs
+        & $Assert $shResult "Bash stdin $Name"
+    }
+}
+
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ssh-linux-payload-policy-test-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tempDir | Out-Null
 
@@ -87,6 +154,33 @@ $bashCandidates = @(
 $script:bash = $bashCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 try {
+    $simpleInline = Invoke-PowerShellCommandEntry -CommandText "uname -a" -ExtraArgs @("--risk", "low")
+    Assert-True ($simpleInline.ExitCode -ne 2) "PowerShell inline one-liner should remain accepted."
+
+    $unsafeInline = Invoke-PowerShellCommandEntry -CommandText "printf 'one'`nprintf 'two'" -ExtraArgs @("--risk", "low")
+    Assert-True ($unsafeInline.ExitCode -eq 2) "PowerShell multiline inline --command should be rejected before SSH."
+    Assert-True ($unsafeInline.Output -match '--command-file|--command-stdin') "PowerShell multiline rejection should point to safer transports."
+
+    Assert-StdinPolicyCase `
+        -Name "short-utf8-token" `
+        -Body "grep '中文' /tmp/app.log`n" `
+        -Assert {
+            param($Result, $Label)
+            Assert-True ($Result.ExitCode -ne 3) "$Label should not require confirmation for a short UTF-8 token."
+            Assert-True ($Result.Output -match 'COMMAND_STDIN_SIZE:') "$Label should report stdin input size."
+            Assert-True ($Result.Output -notmatch 'command_file_non_ascii_payload') "$Label should not warn for a single short UTF-8 token."
+        }
+
+    Assert-StdinPolicyCase `
+        -Name "interpreter-non-ascii" `
+        -Body "python3 <<'PY'`nprint('中文')`nPY`n" `
+        -Assert {
+            param($Result, $Label)
+            Assert-True ($Result.ExitCode -eq 3) "$Label should require confirmation for interpreter stdin with non-ASCII."
+            Assert-True ($Result.Output -match 'WARNING: command_file_interpreted_stdin') "$Label should reuse command-file payload warnings."
+            Assert-True ($Result.Output -match 'RISK: high') "$Label should upgrade non-ASCII interpreter stdin risk to high."
+        }
+
     Assert-PolicyCase `
         -Name "short-utf8-token" `
         -Body "grep '中文' /tmp/app.log`n" `

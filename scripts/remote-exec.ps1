@@ -1,8 +1,21 @@
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
+    [Parameter(ValueFromPipeline = $true)]
+    [AllowNull()]
+    [object]$PipelineInput,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RawArgs
 )
+
+begin {
+    $script:PipelineItems = @()
+}
+
+process {
+    $script:PipelineItems += $PipelineInput
+}
+
+end {
 
 . (Join-Path $PSScriptRoot "ssh-tools.ps1")
 . (Join-Path $PSScriptRoot "process-utils.ps1")
@@ -28,13 +41,15 @@ function Get-HelpSpec {
         usage = @(
             "remote-exec.ps1 --host VALUE --command VALUE [options]",
             "remote-exec.ps1 --host VALUE --command-file VALUE [options]",
+            "remote-exec.ps1 --host VALUE --command-stdin [options]",
             "remote-exec.ps1 --help",
             "remote-exec.ps1 --help-json"
         )
         arguments = @(
             [ordered]@{ name = "--host"; required = $true; value = "VALUE"; description = "SSH host, alias, or user@host target." },
-            [ordered]@{ name = "--command"; required = $false; value = "VALUE"; description = "Inline command text to execute remotely." },
+            [ordered]@{ name = "--command"; required = $false; value = "VALUE"; description = "Short inline command text to execute remotely. Use --command-file or --command-stdin for multiline scripts, heredocs, or heavily quoted commands." },
             [ordered]@{ name = "--command-file"; required = $false; value = "VALUE"; description = "Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed." },
+            [ordered]@{ name = "--command-stdin"; required = $false; value = ""; description = "Read remote shell script text from the local PowerShell pipeline, preferably Get-Content -Raw or a here-string, and stream it to remote sh -s after CRLF/CR carriage returns and a leading UTF-8 BOM are removed." },
             [ordered]@{ name = "--user"; required = $false; value = "VALUE"; description = "Username, used when host is not in user@host form." },
             [ordered]@{ name = "--port"; required = $false; value = "VALUE"; description = "SSH port." },
             [ordered]@{ name = "--auth-mode"; required = $false; value = "ssh-alias|identity-file|default-key-discovery|ssh-agent|password"; description = "Authentication strategy." },
@@ -52,6 +67,7 @@ function Get-HelpSpec {
         examples = @(
             "remote-exec.ps1 --host app-prod --command `"uname -a`"",
             "remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh",
+            "Get-Content .\ops\healthcheck.sh -Raw | .\scripts\remote-exec.ps1 --host 10.0.0.8 --user deploy --command-stdin",
             "remote-exec.ps1 --host app-prod --command `"systemctl restart nginx`" --confirmation-state confirmed"
         )
         output_contract = [ordered]@{
@@ -63,7 +79,7 @@ function Get-HelpSpec {
                 "interactive_password_required", "auth_mode_unsupported", "auth_failed",
                 "connect_failed", "exec_timeout", "command_failed"
             )
-            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM", "NEXT_COMMAND_FILE_PAYLOAD")
+            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "COMMAND_STDIN_SIZE", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM", "NEXT_COMMAND_FILE_PAYLOAD")
         }
     }
 }
@@ -78,12 +94,13 @@ SUMMARY
 USAGE
   remote-exec.ps1 --host VALUE --command VALUE [options]
   remote-exec.ps1 --host VALUE --command-file VALUE [options]
+  remote-exec.ps1 --host VALUE --command-stdin [options]
   remote-exec.ps1 --help
   remote-exec.ps1 --help-json
 
 ARGUMENTS
   --host VALUE
-  --command VALUE | --command-file VALUE
+  --command VALUE | --command-file VALUE | --command-stdin
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
@@ -100,16 +117,19 @@ ARGUMENTS
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, COMMAND_STDIN_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
   remote-exec.ps1 --host app-prod --command "uname -a"
   remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh
+  Get-Content .\ops\healthcheck.sh -Raw | .\scripts\remote-exec.ps1 --host 10.0.0.8 --user deploy --command-stdin
   remote-exec.ps1 --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
 
 NOTES
+  --command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or nested quoting.
   --command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.
+  --command-stdin reads from the PowerShell pipeline and uses the same remote sh -s transport as --command-file. Prefer Get-Content -Raw or a here-string so the whole script is one pipeline value.
 "@
 }
 
@@ -204,6 +224,28 @@ function Write-CommandFileBomWarning {
         Write-Output "WARNING: command_file_bom_normalized"
         Write-Output "NEXT_COMMAND_FILE_BOM: leading UTF-8 BOM was removed before streaming --command-file content to remote sh -s"
     }
+}
+
+function Remove-LeadingUtf8Bom {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return ""
+    }
+
+    return $Text.TrimStart([char]0xFEFF)
+}
+
+function Test-HasTextBom {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    return -not [string]::IsNullOrEmpty($Text) -and $Text[0] -eq [char]0xFEFF
 }
 
 function New-CommandFilePayloadWarning {
@@ -315,7 +357,7 @@ function Get-CommandFileHeredocBlocks {
     )
 
     $blocks = @()
-    $lines = @($CommandText -split "`n", -1)
+    $lines = @($CommandText -split "`n")
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if ($line -notmatch '<<-?\s*(?:''([^'']+)''|"([^"]+)"|([^\s;|&]+))') {
@@ -412,14 +454,52 @@ function Write-CommandFilePayloadWarnings {
     )
 
     foreach ($warning in @($Warnings)) {
+        if ($null -eq $warning -or [string]::IsNullOrWhiteSpace([string]$warning.Label)) {
+            continue
+        }
+
         Write-Output ("WARNING: {0}" -f $warning.Label)
         Write-Output ("NEXT_COMMAND_FILE_PAYLOAD: {0}" -f $warning.Detail)
     }
 }
 
+function Get-PipelineText {
+    param(
+        [object]$Value,
+        [object[]]$RemainingInput
+    )
+
+    $items = @()
+    if ($RemainingInput) {
+        $items += @($RemainingInput)
+    } elseif ($null -ne $Value) {
+        $items += $Value
+    }
+
+    if (-not $items) {
+        return ""
+    }
+
+    return (@($items) | ForEach-Object { [string]$_ }) -join "`n"
+}
+
+function Test-InlineCommandRequiresSaferTransport {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $false
+    }
+
+    return $Text.Contains("`n") -or $Text.Contains("`r") -or $Text -match '<<-?\s*(?:''[^'']+''|"[^"]+"|[^\s;|&]+)'
+}
+
 $HostName = ""
 $CommandText = ""
 $CommandFile = ""
+$CommandStdin = $false
 $CommandFileHadCarriageReturns = $false
 $CommandFileHadUtf8Bom = $false
 $CommandFilePayloadWarnings = @()
@@ -476,6 +556,9 @@ for ($i = 0; $i -lt $RawArgs.Count; $i++) {
         { $_ -in @("--command-file", "-command-file", "-commandfile") } {
             $CommandFile = Get-RequiredOptionValue -Index $i -Name $arg
             $i++
+        }
+        { $_ -in @("--command-stdin", "-command-stdin", "-commandstdin") } {
+            $CommandStdin = $true
         }
         { $_ -in @("--user", "-user", "-username") } {
             $UserName = Get-RequiredOptionValue -Index $i -Name $arg
@@ -548,11 +631,23 @@ if ($HelpJson) {
     exit 0
 }
 
-if (-not [string]::IsNullOrWhiteSpace($CommandText) -and -not [string]::IsNullOrWhiteSpace($CommandFile)) {
+$commandInputModeCount = 0
+if (-not [string]::IsNullOrWhiteSpace($CommandText)) { $commandInputModeCount++ }
+if (-not [string]::IsNullOrWhiteSpace($CommandFile)) { $commandInputModeCount++ }
+if ($CommandStdin) { $commandInputModeCount++ }
+if ($commandInputModeCount -gt 1) {
     Write-Status "STATUS" "invalid_arguments"
     Write-Status "ACTION" "remote_exec"
-    Write-Status "REASON" "provide either --command or --command-file, not both"
+    Write-Status "REASON" "provide only one of --command, --command-file, or --command-stdin"
     Write-Status "NEXT" "choose one command input mode and rerun"
+    exit 2
+}
+
+if (-not [string]::IsNullOrWhiteSpace($CommandText) -and (Test-InlineCommandRequiresSaferTransport -Text $CommandText)) {
+    Write-Status "STATUS" "invalid_arguments"
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "REASON" "inline --command contains multiline or heredoc shell text that is unsafe to pass through PowerShell quoting"
+    Write-Status "NEXT" "use --command-file, or pipe the script with Get-Content -Raw ... | remote-exec.ps1 --command-stdin"
     exit 2
 }
 
@@ -568,6 +663,31 @@ if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
     $CommandFileHadUtf8Bom = Test-HasUtf8Bom -LiteralPath $CommandFile
     $CommandText = Read-TextFileAuto -LiteralPath $CommandFile
     $CommandFileHadCarriageReturns = Test-HasCarriageReturn -Text $CommandText
+    $CommandText = Remove-LeadingUtf8Bom -Text $CommandText
+    $CommandText = ConvertTo-RemoteScriptTransportText -ScriptText $CommandText
+    $CommandFilePayloadWarnings = Get-CommandFilePayloadWarnings -CommandText $CommandText
+    $CommandFilePayloadRequiresConfirmation = Test-CommandFilePayloadRequiresConfirmation -Warnings $CommandFilePayloadWarnings
+}
+
+if ($CommandStdin) {
+    $CommandText = Get-PipelineText -Value $PipelineInput -RemainingInput $script:PipelineItems
+    if ([string]::IsNullOrWhiteSpace($CommandText) -and $MyInvocation.ExpectingInput) {
+        try {
+            $CommandText = [Console]::In.ReadToEnd()
+        } catch {
+            $CommandText = ""
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($CommandText)) {
+        Write-Status "STATUS" "invalid_arguments"
+        Write-Status "ACTION" "remote_exec"
+        Write-Status "REASON" "--command-stdin received no command text"
+        Write-Status "NEXT" "pipe script text with Get-Content -Raw path | remote-exec.ps1 --command-stdin, or use --command-file path"
+        exit 2
+    }
+    $CommandFileHadUtf8Bom = Test-HasTextBom -Text $CommandText
+    $CommandFileHadCarriageReturns = Test-HasCarriageReturn -Text $CommandText
+    $CommandText = Remove-LeadingUtf8Bom -Text $CommandText
     $CommandText = ConvertTo-RemoteScriptTransportText -ScriptText $CommandText
     $CommandFilePayloadWarnings = Get-CommandFilePayloadWarnings -CommandText $CommandText
     $CommandFilePayloadRequiresConfirmation = Test-CommandFilePayloadRequiresConfirmation -Warnings $CommandFilePayloadWarnings
@@ -759,10 +879,14 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedKnownHostsFile) -and -not (Test-P
     exit 5
 }
 
-$isCommandFileMode = -not [string]::IsNullOrWhiteSpace($CommandFile)
+$isStdinScriptMode = -not [string]::IsNullOrWhiteSpace($CommandFile) -or $CommandStdin
 $commandFileSize = $null
-if ($isCommandFileMode) {
+if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
     $commandFileSize = (Get-Item -LiteralPath $CommandFile).Length
+}
+$commandStdinSize = $null
+if ($CommandStdin) {
+    $commandStdinSize = [System.Text.Encoding]::UTF8.GetByteCount($CommandText)
 }
 $keyPermissionWarning = $false
 if ($IdentityFile) {
@@ -772,7 +896,7 @@ if ($IdentityFile) {
 # The caller owns remote shell quoting for CommandText. Only RemoteDir is
 # shell-escaped here because it is always treated as a path literal.
 $remoteCommand = if ($RemoteDir) { "cd {0} && {1}" -f (ConvertTo-PosixSingleQuotedString -Value $RemoteDir), $CommandText } else { $CommandText }
-$remoteScriptInputText = if ($isCommandFileMode) { New-RemoteScriptInputText -ScriptText $CommandText -RemoteDir $RemoteDir } else { $null }
+$remoteScriptInputText = if ($isStdinScriptMode) { New-RemoteScriptInputText -ScriptText $CommandText -RemoteDir $RemoteDir } else { $null }
 
 $sshArgs = @()
 $sshProgram = ""
@@ -817,7 +941,7 @@ if ($AuthMode -eq "password") {
         $sshArgs += @("-o", "BatchMode=yes")
     }
 }
-if ($isCommandFileMode) {
+if ($isStdinScriptMode) {
     $sshArgs += @($target, "sh -s")
 } else {
     $sshArgs += @($target, $remoteCommand)
@@ -853,7 +977,7 @@ try {
         ArgumentList = $sshArgs
         EnvironmentTable = $envTable
     }
-    if ($isCommandFileMode) {
+    if ($isStdinScriptMode) {
         $invokeParams.InputText = $remoteScriptInputText
     }
     if ($ExecTimeout -gt 0) {
@@ -876,8 +1000,11 @@ if ($result.ExitCode -eq 0) {
     Write-Status "REASON" "remote command executed successfully"
     Write-Status "NEXT" "none"
     Write-Status "DURATION_MS" $result.DurationMs
-    if ($isCommandFileMode) {
+    if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
         Write-Output ("COMMAND_FILE_SIZE: {0}" -f $commandFileSize)
+    }
+    if ($CommandStdin) {
+        Write-Output ("COMMAND_STDIN_SIZE: {0}" -f $commandStdinSize)
     }
     if ($keyPermissionWarning) {
         Write-Output ("WARNING: key_permissions_wide")
@@ -933,8 +1060,11 @@ if ($result.TimedOut) {
 }
 
 Write-Status "DURATION_MS" $result.DurationMs
-if ($isCommandFileMode) {
+if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
     Write-Output ("COMMAND_FILE_SIZE: {0}" -f $commandFileSize)
+}
+if ($CommandStdin) {
+    Write-Output ("COMMAND_STDIN_SIZE: {0}" -f $commandStdinSize)
 }
 if ($keyPermissionWarning) {
     Write-Output ("WARNING: key_permissions_wide")
@@ -952,3 +1082,4 @@ if ($result.StdErr) {
     Write-Output $result.StdErr.TrimEnd()
 }
 exit $result.ExitCode
+}

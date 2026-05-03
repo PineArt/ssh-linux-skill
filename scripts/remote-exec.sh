@@ -26,12 +26,13 @@ SUMMARY
 USAGE
   remote-exec.sh --host VALUE --command VALUE [options]
   remote-exec.sh --host VALUE --command-file VALUE [options]
+  remote-exec.sh --host VALUE --command-stdin [options]
   remote-exec.sh --help
   remote-exec.sh --help-json
 
 ARGUMENTS
   --host VALUE
-  --command VALUE | --command-file VALUE
+  --command VALUE | --command-file VALUE | --command-stdin
   --user VALUE
   --port VALUE
   --auth-mode ssh-alias|identity-file|default-key-discovery|ssh-agent|password
@@ -54,16 +55,19 @@ OUTPUT CONTRACT
 EXAMPLES
   remote-exec.sh --host app-prod --command "uname -a"
   remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh
+  cat ./ops/healthcheck.sh | ./scripts/remote-exec.sh --host 10.0.0.8 --user deploy --command-stdin
   remote-exec.sh --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
 
 NOTES
+  --command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or nested quoting.
   --command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.
+  --command-stdin reads local stdin and uses the same remote sh -s transport as --command-file.
 EOF
 }
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Inline command text to execute remotely."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"notes":["--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM","NEXT_COMMAND_FILE_PAYLOAD"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
+{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --host VALUE --command-stdin [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Short inline command text to execute remotely. Use --command-file or --command-stdin for multiline scripts, heredocs, or heavily quoted commands."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--command-stdin","required":false,"value":"","description":"Read remote shell script text from local stdin and stream it to remote sh -s after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","cat ./ops/healthcheck.sh | ./scripts/remote-exec.sh --host 10.0.0.8 --user deploy --command-stdin","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"notes":["--command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or nested quoting.","--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.","--command-stdin reads local stdin and uses the same remote sh -s transport as --command-file."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","COMMAND_STDIN_SIZE","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM","NEXT_COMMAND_FILE_PAYLOAD"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
 EOF
 }
 
@@ -90,6 +94,15 @@ stream_command_file_normalized() {
   fi
 
   LC_ALL=C tr -d '\015' <"$command_file"
+}
+
+normalize_command_text() {
+  local text="$1"
+  text="${text//$'\r'/}"
+  if [[ "$text" == $'\xef\xbb\xbf'* ]]; then
+    text="${text#$'\xef\xbb\xbf'}"
+  fi
+  printf '%s' "$text"
 }
 
 write_command_file_normalization_warning() {
@@ -261,6 +274,7 @@ analyze_command_file_payload() {
 host=""
 command_text=""
 command_file=""
+command_stdin="false"
 user_name=""
 port=""
 auth_mode="ssh-alias"
@@ -288,6 +302,10 @@ while [[ $# -gt 0 ]]; do
     --command-file)
       command_file="${2:-}"
       shift 2
+      ;;
+    --command-stdin)
+      command_stdin="true"
+      shift
       ;;
     --user)
       user_name="${2:-}"
@@ -351,11 +369,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -n "$command_text" && -n "$command_file" ]]; then
+command_input_mode_count=0
+[[ -n "$command_text" ]] && command_input_mode_count=$((command_input_mode_count + 1))
+[[ -n "$command_file" ]] && command_input_mode_count=$((command_input_mode_count + 1))
+[[ "$command_stdin" == "true" ]] && command_input_mode_count=$((command_input_mode_count + 1))
+if [[ "$command_input_mode_count" -gt 1 ]]; then
   status STATUS invalid_arguments
   status ACTION remote_exec
-  status REASON "provide either --command or --command-file, not both"
+  status REASON "provide only one of --command, --command-file, or --command-stdin"
   status NEXT "choose one command input mode and rerun"
+  exit 2
+fi
+
+if [[ -n "$command_text" && ( "$command_text" == *$'\n'* || "$command_text" == *$'\r'* || "$command_text" == *"<<"* ) ]]; then
+  status STATUS invalid_arguments
+  status ACTION remote_exec
+  status REASON "inline --command contains multiline or heredoc shell text that is unsafe to pass through local shell quoting"
+  status NEXT "use --command-file, or pipe the script with cat path | remote-exec.sh --command-stdin"
   exit 2
 fi
 
@@ -377,9 +407,33 @@ if [[ -n "$command_file" ]]; then
   command_text="$(stream_command_file_normalized)"
   analyze_command_file_payload "$command_text"
 fi
+
+if [[ "$command_stdin" == "true" ]]; then
+  raw_stdin="$(cat)"
+  if [[ "$raw_stdin" == *$'\r'* ]]; then
+    command_file_had_carriage_returns="true"
+  fi
+  if [[ "$raw_stdin" == $'\xef\xbb\xbf'* ]]; then
+    command_file_had_utf8_bom="true"
+  fi
+  command_text="$(normalize_command_text "$raw_stdin")"
+  if [[ -z "$command_text" ]]; then
+    status STATUS invalid_arguments
+    status ACTION remote_exec
+    status REASON "--command-stdin received no command text"
+    status NEXT "pipe non-empty script text, or use --command-file path"
+    exit 2
+  fi
+  analyze_command_file_payload "$command_text"
+fi
+
 command_file_size=""
 if [[ -n "$command_file" ]]; then
   command_file_size="$(wc -c <"$command_file" | tr -d '[:space:]')"
+fi
+command_stdin_size=""
+if [[ "$command_stdin" == "true" ]]; then
+  command_stdin_size="$(printf '%s' "$command_text" | wc -c | tr -d '[:space:]')"
 fi
 
 if [[ -z "$host" || -z "$command_text" ]]; then
@@ -605,9 +659,9 @@ remote_command="$command_text"
 if [[ -n "$remote_dir" ]]; then
   remote_command="cd '$escaped_dir' && $command_text"
 fi
-is_command_file_mode="false"
-if [[ -n "$command_file" ]]; then
-  is_command_file_mode="true"
+is_stdin_script_mode="false"
+if [[ -n "$command_file" || "$command_stdin" == "true" ]]; then
+  is_stdin_script_mode="true"
 fi
 
 ssh_args=()
@@ -693,12 +747,16 @@ run_ssh() {
 printf '%s\n' "$SSH_LINUX_ASKPASS_SECRET"
 EOF
     chmod 700 "$askpass_file"
-    if [[ "$is_command_file_mode" == "true" ]]; then
+    if [[ "$is_stdin_script_mode" == "true" ]]; then
       {
         if [[ -n "$remote_script_prefix" ]]; then
           printf '%s' "$remote_script_prefix"
         fi
-        stream_command_file_normalized
+        if [[ -n "$command_file" ]]; then
+          stream_command_file_normalized
+        else
+          printf '%s' "$command_text"
+        fi
       } | env \
         SSH_LINUX_ASKPASS_SECRET="$password_value" \
         SSH_ASKPASS="$askpass_file" \
@@ -714,12 +772,16 @@ EOF
         "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
     fi
   else
-    if [[ "$is_command_file_mode" == "true" ]]; then
+    if [[ "$is_stdin_script_mode" == "true" ]]; then
       {
         if [[ -n "$remote_script_prefix" ]]; then
           printf '%s' "$remote_script_prefix"
         fi
-        stream_command_file_normalized
+        if [[ -n "$command_file" ]]; then
+          stream_command_file_normalized
+        else
+          printf '%s' "$command_text"
+        fi
       } | "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "sh -s" >"$stdout_file" 2>"$stderr_file"
     else
       "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
@@ -749,6 +811,9 @@ if [[ "$exit_code" -eq 0 ]]; then
   status DURATION_MS "$duration_ms"
   if [[ -n "$command_file_size" ]]; then
     printf 'COMMAND_FILE_SIZE: %s\n' "$command_file_size"
+  fi
+  if [[ -n "$command_stdin_size" ]]; then
+    printf 'COMMAND_STDIN_SIZE: %s\n' "$command_stdin_size"
   fi
   if [[ "$key_permission_warning" == "true" ]]; then
     printf 'WARNING: key_permissions_wide\n'
@@ -807,6 +872,9 @@ fi
 status DURATION_MS "$duration_ms"
 if [[ -n "$command_file_size" ]]; then
   printf 'COMMAND_FILE_SIZE: %s\n' "$command_file_size"
+fi
+if [[ -n "$command_stdin_size" ]]; then
+  printf 'COMMAND_STDIN_SIZE: %s\n' "$command_stdin_size"
 fi
 if [[ "$key_permission_warning" == "true" ]]; then
   printf 'WARNING: key_permissions_wide\n'

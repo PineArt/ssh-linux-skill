@@ -65,6 +65,28 @@ function Join-WindowsCommandLine {
     return ($escaped -join " ")
 }
 
+function ConvertTo-CmdPipelineArgument {
+    param(
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value) {
+        $Value = ""
+    }
+
+    $escaped = $Value.Replace('"', '\"').Replace('%', '%%').Replace('^', '^^')
+    return '"{0}"' -f $escaped
+}
+
+function Join-CmdPipelineCommand {
+    param(
+        [string[]]$ArgumentList
+    )
+
+    return (@($ArgumentList) | ForEach-Object { ConvertTo-CmdPipelineArgument -Value ([string]$_) }) -join " "
+}
+
 function Set-ProcessEnvironmentValue {
     param(
         [System.Diagnostics.ProcessStartInfo]$StartInfo,
@@ -100,6 +122,18 @@ function Invoke-NativeProcessCapture {
     $startInfo.RedirectStandardError = $true
     $startInfo.RedirectStandardInput = ($PSBoundParameters.ContainsKey('InputText'))
     $startInfo.CreateNoWindow = $true
+    $stdinEncodingProperty = $startInfo.GetType().GetProperty("StandardInputEncoding")
+    if ($PSBoundParameters.ContainsKey('InputText') -and -not $stdinEncodingProperty) {
+        return Invoke-NativeProcessCaptureWithInputFile `
+            -FilePath $FilePath `
+            -ArgumentList $ArgumentList `
+            -EnvironmentTable $EnvironmentTable `
+            -InputText $InputText `
+            -TimeoutSeconds $TimeoutSeconds
+    }
+    if ($PSBoundParameters.ContainsKey('InputText') -and $stdinEncodingProperty) {
+        $stdinEncodingProperty.SetValue($startInfo, [System.Text.UTF8Encoding]::new($false), $null)
+    }
 
     $argumentListProperty = $startInfo.GetType().GetProperty("ArgumentList")
     if ($argumentListProperty) {
@@ -124,9 +158,100 @@ function Invoke-NativeProcessCapture {
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
         if ($PSBoundParameters.ContainsKey('InputText')) {
-            $process.StandardInput.Write($InputText)
+            $inputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $inputBytes = $inputEncoding.GetBytes($InputText)
+            $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length)
+            $process.StandardInput.BaseStream.Flush()
             $process.StandardInput.Close()
         }
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        if ($TimeoutSeconds -gt 0) {
+            $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $completed) {
+                try {
+                    $process.Kill()
+                } catch {
+                }
+                $process.WaitForExit()
+                [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
+                $stopwatch.Stop()
+
+                return @{
+                    ExitCode = 124
+                    StdOut = $stdoutTask.GetAwaiter().GetResult()
+                    StdErr = $stderrTask.GetAwaiter().GetResult()
+                    TimedOut = $true
+                    DurationMs = [int64]$stopwatch.ElapsedMilliseconds
+                }
+            }
+        } else {
+            $process.WaitForExit()
+        }
+        [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask))
+        $stopwatch.Stop()
+
+        return @{
+            ExitCode = $process.ExitCode
+            StdOut = $stdoutTask.GetAwaiter().GetResult()
+            StdErr = $stderrTask.GetAwaiter().GetResult()
+            TimedOut = $false
+            DurationMs = [int64]$stopwatch.ElapsedMilliseconds
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Invoke-NativeProcessCaptureWithInputFile {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [hashtable]$EnvironmentTable,
+        [AllowEmptyString()]
+        [string]$InputText,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $inputFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($inputFile, $InputText, [System.Text.UTF8Encoding]::new($false))
+        $cmdPath = Join-Path $env:SystemRoot "System32\cmd.exe"
+        $commandLine = 'type {0} | {1}' -f (ConvertTo-CmdPipelineArgument -Value $inputFile), (Join-CmdPipelineCommand -ArgumentList (@($FilePath) + @($ArgumentList)))
+        return Invoke-NativeProcessCaptureRawArguments -FilePath $cmdPath -Arguments ("/d /c " + $commandLine) -EnvironmentTable $EnvironmentTable -TimeoutSeconds $TimeoutSeconds
+    } finally {
+        Remove-Item -LiteralPath $inputFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-NativeProcessCaptureRawArguments {
+    param(
+        [string]$FilePath,
+        [string]$Arguments,
+        [hashtable]$EnvironmentTable,
+        [int]$TimeoutSeconds = 0
+    )
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    if ($EnvironmentTable) {
+        foreach ($key in $EnvironmentTable.Keys) {
+            Set-ProcessEnvironmentValue -StartInfo $startInfo -Name $key -Value ([string]$EnvironmentTable[$key])
+        }
+    }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+
+    try {
+        [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         if ($TimeoutSeconds -gt 0) {
             $completed = $process.WaitForExit($TimeoutSeconds * 1000)
@@ -349,8 +474,12 @@ if ($MyInvocation.InvocationName -ne ".") {
             exported_functions = @(
                 "ConvertTo-WindowsCommandLineArgument",
                 "Join-WindowsCommandLine",
+                "ConvertTo-CmdPipelineArgument",
+                "Join-CmdPipelineCommand",
                 "Set-ProcessEnvironmentValue",
                 "Invoke-NativeProcessCapture",
+                "Invoke-NativeProcessCaptureWithInputFile",
+                "Invoke-NativeProcessCaptureRawArguments",
                 "Read-TextFileAuto",
                 "Get-PowerShellExecutablePath",
                 "Format-OpenSshOptionAssignment",
@@ -385,8 +514,12 @@ USAGE
 EXPORTED FUNCTIONS
   ConvertTo-WindowsCommandLineArgument
   Join-WindowsCommandLine
+  ConvertTo-CmdPipelineArgument
+  Join-CmdPipelineCommand
   Set-ProcessEnvironmentValue
   Invoke-NativeProcessCapture
+  Invoke-NativeProcessCaptureWithInputFile
+  Invoke-NativeProcessCaptureRawArguments
   Read-TextFileAuto
   Get-PowerShellExecutablePath
   Format-OpenSshOptionAssignment
