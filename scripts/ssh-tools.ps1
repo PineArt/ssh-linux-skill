@@ -126,6 +126,50 @@ function Get-SshToolchain {
     }
 }
 
+function Select-OpenSshToolchainForConnectionReuse {
+    param(
+        [hashtable]$Toolchain,
+        [switch]$RequireScp
+    )
+
+    $selected = @{} + $Toolchain
+    $selected.reuse_supported = $false
+    $selected.reuse_reason = "OpenSSH ControlMaster reuse requires Git OpenSSH on this Windows host"
+
+    if (-not $Toolchain -or $Toolchain.backend -ne "openssh") {
+        return $selected
+    }
+
+    $gitSsh = @($Toolchain.ssh_candidates) | Where-Object {
+        $_ -match '(?i)\\Git\\(usr\\bin|bin)\\ssh\.exe$'
+    } | Select-Object -First 1
+    if (-not $gitSsh) {
+        return $selected
+    }
+
+    $selected.ssh = $gitSsh
+    if ($RequireScp) {
+        $gitDir = Split-Path -Parent $gitSsh
+        $preferredScp = Join-Path $gitDir "scp.exe"
+        if (Test-Path -LiteralPath $preferredScp) {
+            $selected.scp = $preferredScp
+        } else {
+            $gitScp = @($Toolchain.scp_candidates) | Where-Object {
+                $_ -match '(?i)\\Git\\(usr\\bin|bin)\\scp\.exe$'
+            } | Select-Object -First 1
+            if (-not $gitScp) {
+                $selected.reuse_reason = "Git OpenSSH was found but Git scp.exe is unavailable"
+                return $selected
+            }
+            $selected.scp = $gitScp
+        }
+    }
+
+    $selected.reuse_supported = $true
+    $selected.reuse_reason = ""
+    return $selected
+}
+
 if ($MyInvocation.InvocationName -ne ".") {
     $showHelp = $args -contains "-h" -or $args -contains "--help" -or $args -contains "-Help"
     $showHelpJson = $args -contains "--help-json" -or $args -contains "-help-json"
@@ -134,7 +178,7 @@ if ($MyInvocation.InvocationName -ne ".") {
         [ordered]@{
             name = "ssh-tools.ps1"
             summary = "PowerShell utility module for SSH toolchain discovery."
-            exported_functions = @("Get-UniqueExistingPaths", "Find-ExecutableCandidates", "Get-SshToolchain")
+            exported_functions = @("Get-UniqueExistingPaths", "Find-ExecutableCandidates", "Get-SshToolchain", "Select-OpenSshToolchainForConnectionReuse")
             usage = @(
                 "Dot-source from entry scripts: . .\\ssh-tools.ps1",
                 "Direct run for diagnostics: .\\ssh-tools.ps1 --help",
@@ -162,6 +206,7 @@ EXPORTED FUNCTIONS
   Get-UniqueExistingPaths
   Find-ExecutableCandidates
   Get-SshToolchain
+  Select-OpenSshToolchainForConnectionReuse
 "@ | Write-Output
         exit 0
     }

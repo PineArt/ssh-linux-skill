@@ -60,6 +60,8 @@ function Get-HelpSpec {
             [ordered]@{ name = "--confirmation-state"; required = $false; value = "pending|confirmed|none"; description = "High-risk confirmation gate." },
             [ordered]@{ name = "--password-env"; required = $false; value = "VALUE"; description = "Environment variable name for password mode." },
             [ordered]@{ name = "--timeout"; required = $false; value = "VALUE"; description = "SSH connect timeout in seconds." },
+            [ordered]@{ name = "--reuse-connection"; required = $false; value = ""; description = "Reuse an OpenSSH connection via ControlMaster/ControlPersist when supported." },
+            [ordered]@{ name = "--control-persist"; required = $false; value = "VALUE"; description = "ControlPersist lifetime in seconds when --reuse-connection is enabled. Default 60." },
             [ordered]@{ name = "--exec-timeout"; required = $false; value = "VALUE"; description = "Remote command execution timeout in seconds. 0 means no execution timeout." },
             [ordered]@{ name = "--help|-h|-Help"; required = $false; value = ""; description = "Show human-readable help." },
             [ordered]@{ name = "--help-json|-help-json"; required = $false; value = ""; description = "Show machine-readable JSON help." }
@@ -68,7 +70,8 @@ function Get-HelpSpec {
             "remote-exec.ps1 --host app-prod --command `"uname -a`"",
             "remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh",
             "Get-Content .\ops\healthcheck.sh -Raw | .\scripts\remote-exec.ps1 --host 10.0.0.8 --user deploy --command-stdin",
-            "remote-exec.ps1 --host app-prod --command `"systemctl restart nginx`" --confirmation-state confirmed"
+            "remote-exec.ps1 --host app-prod --command `"systemctl restart nginx`" --confirmation-state confirmed",
+            "remote-exec.ps1 --host app-prod --reuse-connection --control-persist 60 --command `"uname -a`""
         )
         output_contract = [ordered]@{
             format = "plain-text status labels with optional OUTPUT/STDERR blocks"
@@ -79,7 +82,7 @@ function Get-HelpSpec {
                 "interactive_password_required", "auth_mode_unsupported", "auth_failed",
                 "connect_failed", "exec_timeout", "command_failed"
             )
-            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "COMMAND_STDIN_SIZE", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM", "NEXT_COMMAND_FILE_PAYLOAD")
+            extra_labels = @("DURATION_MS", "COMMAND_FILE_SIZE", "COMMAND_STDIN_SIZE", "CONTROL_PATH", "CONTROL_PERSIST", "WARNING", "NEXT_COMMAND_FILE", "NEXT_COMMAND_FILE_BOM", "NEXT_COMMAND_FILE_PAYLOAD")
         }
     }
 }
@@ -111,13 +114,15 @@ ARGUMENTS
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --reuse-connection
+  --control-persist VALUE
   --exec-timeout VALUE
   --help | -h | -Help
   --help-json | -help-json
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, COMMAND_STDIN_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, COMMAND_STDIN_SIZE, CONTROL_PATH, CONTROL_PERSIST, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -125,11 +130,13 @@ EXAMPLES
   remote-exec.ps1 --host 10.0.0.8 --user deploy --command-file .\ops\healthcheck.sh
   Get-Content .\ops\healthcheck.sh -Raw | .\scripts\remote-exec.ps1 --host 10.0.0.8 --user deploy --command-stdin
   remote-exec.ps1 --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
+  remote-exec.ps1 --host app-prod --reuse-connection --control-persist 60 --command "uname -a"
 
 NOTES
   --command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or nested quoting.
   --command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.
   --command-stdin reads from the PowerShell pipeline and uses the same remote sh -s transport as --command-file. Prefer Get-Content -Raw or a here-string so the whole script is one pipeline value.
+  --reuse-connection enables OpenSSH ControlMaster/ControlPersist for latency reduction without changing per-command output or exit code handling.
 "@
 }
 
@@ -514,6 +521,8 @@ $Risk = "auto"
 $ConfirmationState = "none"
 $PasswordEnv = "SSH_PASSWORD"
 $Timeout = "15"
+$ReuseConnection = $false
+$ControlPersist = 60
 $ExecTimeout = 0
 $Help = $false
 $HelpJson = $false
@@ -598,6 +607,20 @@ for ($i = 0; $i -lt $RawArgs.Count; $i++) {
         }
         { $_ -in @("--timeout", "-timeout") } {
             $Timeout = Get-RequiredOptionValue -Index $i -Name $arg
+            $i++
+        }
+        { $_ -in @("--reuse-connection", "-reuse-connection", "-reuseconnection") } {
+            $ReuseConnection = $true
+        }
+        { $_ -in @("--control-persist", "-control-persist", "-controlpersist") } {
+            $value = Get-RequiredOptionValue -Index $i -Name $arg
+            if (-not [int]::TryParse($value, [ref]$ControlPersist) -or $ControlPersist -lt 1) {
+                Write-Status "STATUS" "invalid_arguments"
+                Write-Status "ACTION" "remote_exec"
+                Write-Status "REASON" "--control-persist must be a positive integer number of seconds"
+                Write-Status "NEXT" "provide a valid --control-persist value"
+                exit 2
+            }
             $i++
         }
         { $_ -in @("--exec-timeout", "-exec-timeout", "-exectimeout") } {
@@ -770,6 +793,31 @@ if ($toolchain.backend -eq "none") {
     exit 4
 }
 
+if ($ReuseConnection -and $toolchain.backend -ne "openssh") {
+    Write-Status "STATUS" "auth_tool_unavailable"
+    Write-Status "HOST" $target
+    Write-Status "ACTION" "remote_exec"
+    Write-Status "AUTH_MODE" $AuthMode
+    Write-Status "RISK" $Risk
+    Write-Status "REASON" "--reuse-connection requires OpenSSH ControlMaster support"
+    Write-Status "NEXT" "use OpenSSH or rerun without --reuse-connection"
+    exit 4
+}
+if ($ReuseConnection) {
+    $reuseToolchain = Select-OpenSshToolchainForConnectionReuse -Toolchain $toolchain
+    if (-not $reuseToolchain.reuse_supported) {
+        Write-Status "STATUS" "auth_tool_unavailable"
+        Write-Status "HOST" $target
+        Write-Status "ACTION" "remote_exec"
+        Write-Status "AUTH_MODE" $AuthMode
+        Write-Status "RISK" $Risk
+        Write-Status "REASON" $reuseToolchain.reuse_reason
+        Write-Status "NEXT" "install Git OpenSSH or rerun without --reuse-connection"
+        exit 4
+    }
+    $toolchain = $reuseToolchain
+}
+
 switch ($AuthMode) {
     "ssh-alias" { }
     "identity-file" {
@@ -892,6 +940,10 @@ $keyPermissionWarning = $false
 if ($IdentityFile) {
     $keyPermissionWarning = Test-WindowsPrivateKeyPermissionWarning -LiteralPath $IdentityFile
 }
+$controlPath = $null
+if ($ReuseConnection) {
+    $controlPath = New-OpenSshControlPath -Target $target -Port $Port -IdentityFile $IdentityFile -KnownHostsFile $resolvedKnownHostsFile -AuthMode $AuthMode
+}
 
 # The caller owns remote shell quoting for CommandText. Only RemoteDir is
 # shell-escaped here because it is always treated as a path literal.
@@ -899,33 +951,36 @@ $remoteCommand = if ($RemoteDir) { "cd {0} && {1}" -f (ConvertTo-PosixSingleQuot
 $remoteScriptInputText = if ($isStdinScriptMode) { New-RemoteScriptInputText -ScriptText $CommandText -RemoteDir $RemoteDir } else { $null }
 
 $sshArgs = @()
+$sshConnectionArgs = @()
 $sshProgram = ""
 if ($toolchain.backend -eq "openssh") {
     $sshProgram = $toolchain.ssh
-    $sshArgs += @("-o", "ConnectTimeout=$Timeout")
+    $sshConnectionArgs += @("-o", "ConnectTimeout=$Timeout")
 } elseif ($toolchain.backend -eq "putty") {
     $sshProgram = $toolchain.plink
     $sshArgs += @("-batch")
 }
 if ($Port) {
     if ($toolchain.backend -eq "openssh") {
-        $sshArgs += @("-p", $Port)
+        $sshConnectionArgs += @("-p", $Port)
     } else {
         $sshArgs += @("-P", $Port)
     }
 }
 if ($IdentityFile) {
-    $sshArgs += @("-i", $IdentityFile)
     if ($toolchain.backend -eq "openssh") {
-        $sshArgs += @("-o", "IdentitiesOnly=yes")
+        $sshConnectionArgs += @("-i", $IdentityFile)
+        $sshConnectionArgs += @("-o", "IdentitiesOnly=yes")
+    } else {
+        $sshArgs += @("-i", $IdentityFile)
     }
 }
 if ($resolvedKnownHostsFile -and $toolchain.backend -eq "openssh") {
-    $sshArgs += @("-o", (Format-OpenSshOptionAssignment -Name "UserKnownHostsFile" -Value $resolvedKnownHostsFile))
+    $sshConnectionArgs += @("-o", (Format-OpenSshOptionAssignment -Name "UserKnownHostsFile" -Value $resolvedKnownHostsFile))
 }
 if ($AuthMode -eq "password") {
     if ($toolchain.backend -eq "openssh") {
-        $sshArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+        $sshConnectionArgs += @("-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
     } else {
         Write-Status "STATUS" "auth_mode_unsupported"
         Write-Status "HOST" $target
@@ -938,7 +993,17 @@ if ($AuthMode -eq "password") {
     }
 } else {
     if ($toolchain.backend -eq "openssh") {
-        $sshArgs += @("-o", "BatchMode=yes")
+        $sshConnectionArgs += @("-o", "BatchMode=yes")
+    }
+}
+if ($toolchain.backend -eq "openssh") {
+    $sshArgs += $sshConnectionArgs
+    if ($ReuseConnection) {
+        $sshArgs += @(
+            "-o", "ControlMaster=no",
+            "-o", (Format-OpenSshOptionAssignment -Name "ControlPath" -Value $controlPath),
+            "-o", "ControlPersist=${ControlPersist}s"
+        )
     }
 }
 if ($isStdinScriptMode) {
@@ -972,6 +1037,50 @@ try {
         }
     }
 
+    if ($ReuseConnection) {
+        $masterResult = Invoke-OpenSshControlMaster -SshProgram $sshProgram -BaseArguments $sshConnectionArgs -Target $target -ControlPath $controlPath -ControlPersist $ControlPersist -EnvironmentTable $envTable
+        if ($masterResult.ExitCode -ne 0) {
+            $stderrText = $masterResult.StdErr
+            if ($stderrText -match 'permission denied|authentication failed') {
+                Write-Status "STATUS" "auth_failed"
+                Write-Status "HOST" $target
+                Write-Status "ACTION" "remote_exec"
+                Write-Status "AUTH_MODE" $AuthMode
+                Write-Status "RISK" $Risk
+                Write-Status "REASON" "ssh authentication failed"
+                Write-Status "NEXT" "check auth mode, identity, agent, or password environment"
+            } elseif ($stderrText -match 'could not resolve hostname|connection timed out|no route to host|connection refused|name or service not known') {
+                Write-Status "STATUS" "connect_failed"
+                Write-Status "HOST" $target
+                Write-Status "ACTION" "remote_exec"
+                Write-Status "AUTH_MODE" $AuthMode
+                Write-Status "RISK" $Risk
+                Write-Status "REASON" "ssh connection failed"
+                Write-Status "NEXT" "check host, port, network reachability, and SSH service availability"
+            } else {
+                Write-Status "STATUS" "auth_tool_unavailable"
+                Write-Status "HOST" $target
+                Write-Status "ACTION" "remote_exec"
+                Write-Status "AUTH_MODE" $AuthMode
+                Write-Status "RISK" $Risk
+                Write-Status "REASON" "failed to establish SSH control master"
+                Write-Status "NEXT" "inspect STDERR and reuse-connection support"
+            }
+            Write-Status "DURATION_MS" $masterResult.DurationMs
+            Write-Output ("CONTROL_PATH: {0}" -f $controlPath)
+            Write-Output ("CONTROL_PERSIST: {0}s" -f $ControlPersist)
+            if ($masterResult.StdOut) {
+                Write-Output "OUTPUT:"
+                Write-Output $masterResult.StdOut.TrimEnd()
+            }
+            if ($masterResult.StdErr) {
+                Write-Output "STDERR:"
+                Write-Output $masterResult.StdErr.TrimEnd()
+            }
+            exit $masterResult.ExitCode
+        }
+    }
+
     $invokeParams = @{
         FilePath = $sshProgram
         ArgumentList = $sshArgs
@@ -984,11 +1093,18 @@ try {
         $invokeParams.TimeoutSeconds = $ExecTimeout
     }
 
-    $result = Invoke-NativeProcessCapture @invokeParams
+    if ($ReuseConnection) {
+        $result = Invoke-NativeProcessCaptureWithOutputFiles @invokeParams
+    } else {
+        $result = Invoke-NativeProcessCapture @invokeParams
+    }
 } finally {
     if ($askPassPath) {
         Remove-Item -LiteralPath $askPassPath -Force -ErrorAction SilentlyContinue
     }
+}
+if ($ReuseConnection) {
+    $result.StdErr = Remove-OpenSshMuxNoise -Text $result.StdErr
 }
 
 if ($result.ExitCode -eq 0) {
@@ -1000,6 +1116,10 @@ if ($result.ExitCode -eq 0) {
     Write-Status "REASON" "remote command executed successfully"
     Write-Status "NEXT" "none"
     Write-Status "DURATION_MS" $result.DurationMs
+    if ($ReuseConnection) {
+        Write-Output ("CONTROL_PATH: {0}" -f $controlPath)
+        Write-Output ("CONTROL_PERSIST: {0}s" -f $ControlPersist)
+    }
     if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
         Write-Output ("COMMAND_FILE_SIZE: {0}" -f $commandFileSize)
     }
@@ -1060,6 +1180,10 @@ if ($result.TimedOut) {
 }
 
 Write-Status "DURATION_MS" $result.DurationMs
+if ($ReuseConnection) {
+    Write-Output ("CONTROL_PATH: {0}" -f $controlPath)
+    Write-Output ("CONTROL_PERSIST: {0}s" -f $ControlPersist)
+}
 if (-not [string]::IsNullOrWhiteSpace($CommandFile)) {
     Write-Output ("COMMAND_FILE_SIZE: {0}" -f $commandFileSize)
 }

@@ -52,6 +52,7 @@ Prefer this skill when the user asks to:
 10. Treat `--command`, `--command-file`, and `--command-stdin` as shell control text channels, not general application payload channels. Short inline UTF-8 tokens such as filenames or search patterns can stay in command text when the environment supports them. For non-trivial business payloads such as SQL, JSON, YAML, Markdown, prompts, CSV, config fragments, or other data with locale-specific or non-ASCII content, prefer `remote-copy` to upload a UTF-8 file, verify the uploaded path, then reference that path from the command. Payload producers and receivers must specify encoding explicitly, defaulting to UTF-8 and avoiding platform defaults. Use a base64 envelope only when file transfer is not practical, and decode it explicitly at the receiver.
 11. In sandboxed runtimes, CI, or environments where `$HOME` may not be the real user profile, pass an explicit `--known-hosts-file` instead of relying on automatic discovery.
 12. Treat `--timeout` as an SSH connection timeout only. Use `remote-exec --exec-timeout` when a non-interactive remote command needs a runtime limit.
+13. `--reuse-connection` is an opt-in latency knob for OpenSSH only. It prepares a ControlMaster before the requested command or transfer, then runs the requested operation through that master while preserving the wrapper's per-command stdout, stderr, exit code, and risk workflow. Use `--control-persist` only with a positive integer number of seconds. Control sockets are disposable, short, and partitioned by target, port, identity file, known-hosts file, and auth mode.
 
 ## Responsibility Split
 
@@ -167,6 +168,7 @@ Read the detailed rules in [references/auth-model.md](references/auth-model.md).
 ## Known Limitations
 
 - `--timeout` maps to SSH connection timeout; remote command execution can run indefinitely unless `remote-exec --exec-timeout` is supplied.
+- `--reuse-connection` depends on OpenSSH ControlMaster/ControlPersist and is refused on PuTTY paths. A master process can remain alive until `--control-persist` expires; use the emitted `CONTROL_PATH` for manual inspection or teardown if needed.
 - File transfer uses `scp` or `pscp`. This skill does not automatically fall back to SFTP.
 - Password automation is best-effort through `SSH_ASKPASS` and a named environment variable.
 - On Windows, Git-for-Windows SSH can behave differently from system OpenSSH. Prefer the PowerShell entry points and system OpenSSH when available.

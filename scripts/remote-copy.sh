@@ -33,6 +33,8 @@ ARGUMENTS
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --reuse-connection
+  --control-persist VALUE
   --recursive
   --help | -h
   --help-json
@@ -40,19 +42,20 @@ ARGUMENTS
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
   Transfer labels: DIRECTION, SOURCE, TARGET
-  Additional labels: DURATION_MS, WARNING
+  Additional labels: DURATION_MS, CONTROL_PATH, CONTROL_PERSIST, WARNING
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
   remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz
   remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log
   remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed
+  remote-copy.sh --host app-prod --reuse-connection --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz
 EOF
 }
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-copy.sh","summary":"Upload or download files over SSH/SCP with auth and risk checks.","usage":["remote-copy.sh --host VALUE --direction upload|download --source VALUE --target VALUE [options]","remote-copy.sh --help","remote-copy.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--direction","required":true,"value":"upload|download","description":"Transfer direction."},{"name":"--source","required":true,"value":"VALUE","description":"Source path (local for upload, remote for download)."},{"name":"--target","required":true,"value":"VALUE","description":"Target path (remote for upload, local for download)."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies path sensitivity."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--recursive","required":false,"value":"","description":"Enable recursive copy for directories."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz","remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log","remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed"],"output_contract":{"format":"plain-text status labels with transfer context and optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DIRECTION","SOURCE","TARGET","DURATION_MS","WARNING"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_source","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","transfer_failed"]}}
+{"name":"remote-copy.sh","summary":"Upload or download files over SSH/SCP with auth and risk checks.","usage":["remote-copy.sh --host VALUE --direction upload|download --source VALUE --target VALUE [options]","remote-copy.sh --help","remote-copy.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--direction","required":true,"value":"upload|download","description":"Transfer direction."},{"name":"--source","required":true,"value":"VALUE","description":"Source path (local for upload, remote for download)."},{"name":"--target","required":true,"value":"VALUE","description":"Target path (remote for upload, local for download)."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies path sensitivity."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--reuse-connection","required":false,"value":"","description":"Reuse an OpenSSH connection via ControlMaster/ControlPersist when supported."},{"name":"--control-persist","required":false,"value":"VALUE","description":"ControlPersist lifetime in seconds when --reuse-connection is enabled. Default 60."},{"name":"--recursive","required":false,"value":"","description":"Enable recursive copy for directories."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-copy.sh --host app-prod --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz","remote-copy.sh --host app-prod --direction download --source /var/log/nginx/access.log --target ./logs/access.log","remote-copy.sh --host app-prod --direction upload --source ./config.env --target /etc/app/config.env --confirmation-state confirmed","remote-copy.sh --host app-prod --reuse-connection --direction upload --source ./build/app.tar.gz --target /tmp/app.tar.gz"],"output_contract":{"format":"plain-text status labels with transfer context and optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DIRECTION","SOURCE","TARGET","DURATION_MS","CONTROL_PATH","CONTROL_PERSIST","WARNING"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_source","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","transfer_failed"]}}
 EOF
 }
 
@@ -69,6 +72,8 @@ risk="auto"
 confirmation_state="none"
 password_env="SSH_PASSWORD"
 timeout="15"
+reuse_connection="false"
+control_persist="60"
 recursive="false"
 
 while [[ $# -gt 0 ]]; do
@@ -123,6 +128,21 @@ while [[ $# -gt 0 ]]; do
       ;;
     --timeout)
       timeout="${2:-}"
+      shift 2
+      ;;
+    --reuse-connection)
+      reuse_connection="true"
+      shift
+      ;;
+    --control-persist)
+      control_persist="${2:-}"
+      if [[ ! "$control_persist" =~ ^[0-9]+$ || "$control_persist" -lt 1 ]]; then
+        status STATUS invalid_arguments
+        status ACTION remote_copy
+        status REASON "--control-persist must be a positive integer number of seconds"
+        status NEXT "provide a valid --control-persist value"
+        exit 2
+      fi
       shift 2
       ;;
     --recursive)
@@ -243,6 +263,16 @@ if [[ "$ssh_toolchain_backend" == "none" ]]; then
   exit 4
 fi
 
+if [[ "$reuse_connection" == "true" && "$ssh_toolchain_backend" != "openssh" ]]; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_copy
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "--reuse-connection requires OpenSSH ControlMaster support"
+  status NEXT "use OpenSSH or rerun without --reuse-connection"
+  exit 4
+fi
 if [[ "$ssh_toolchain_backend" == "openssh" && -z "$scp_tool" ]]; then
   status STATUS auth_tool_unavailable
   status HOST "$target"
@@ -387,15 +417,22 @@ if [[ -n "$identity_file" && -f "$identity_file" ]]; then
   fi
 fi
 
+control_path=""
+if [[ "$reuse_connection" == "true" ]]; then
+  control_path="$(new_openssh_control_path "$target" "$port" "$identity_file" "$known_hosts_file" "$auth_mode")"
+fi
+
 ssh_args=()
 copy_args=()
+ssh_connection_args=()
+copy_connection_args=()
 ssh_program=""
 copy_program=""
 if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
   ssh_program="$ssh_tool"
   copy_program="$scp_tool"
-  ssh_args+=(-o "ConnectTimeout=$timeout")
-  copy_args+=(-o "ConnectTimeout=$timeout")
+  ssh_connection_args+=(-o "ConnectTimeout=$timeout")
+  copy_connection_args+=(-o "ConnectTimeout=$timeout")
 else
   ssh_program="$plink_tool"
   copy_program="$pscp_tool"
@@ -404,24 +441,27 @@ else
 fi
 if [[ -n "$port" ]]; then
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
-    ssh_args+=(-p "$port")
-    copy_args+=(-P "$port")
+    ssh_connection_args+=(-p "$port")
+    copy_connection_args+=(-P "$port")
   else
     ssh_args+=(-P "$port")
     copy_args+=(-P "$port")
   fi
 fi
 if [[ -n "$identity_file" ]]; then
-  ssh_args+=(-i "$identity_file")
-  copy_args+=(-i "$identity_file")
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
-    ssh_args+=(-o "IdentitiesOnly=yes")
-    copy_args+=(-o "IdentitiesOnly=yes")
+    ssh_connection_args+=(-i "$identity_file")
+    copy_connection_args+=(-i "$identity_file")
+    ssh_connection_args+=(-o "IdentitiesOnly=yes")
+    copy_connection_args+=(-o "IdentitiesOnly=yes")
+  else
+    ssh_args+=(-i "$identity_file")
+    copy_args+=(-i "$identity_file")
   fi
 fi
 if [[ -n "$known_hosts_file" && "$ssh_toolchain_backend" == "openssh" ]]; then
-  ssh_args+=(-o "UserKnownHostsFile=$known_hosts_file")
-  copy_args+=(-o "UserKnownHostsFile=$known_hosts_file")
+  ssh_connection_args+=(-o "UserKnownHostsFile=$known_hosts_file")
+  copy_connection_args+=(-o "UserKnownHostsFile=$known_hosts_file")
 fi
 if [[ "$auth_mode" == "password" ]]; then
   if [[ "$ssh_toolchain_backend" != "openssh" ]]; then
@@ -434,12 +474,25 @@ if [[ "$auth_mode" == "password" ]]; then
     status NEXT "use OpenSSH or a key-based auth mode"
     exit 8
   fi
-  ssh_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
-  copy_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
+  ssh_connection_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
+  copy_connection_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
 else
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
-    ssh_args+=(-o "BatchMode=yes")
-    copy_args+=(-o "BatchMode=yes")
+    ssh_connection_args+=(-o "BatchMode=yes")
+    copy_connection_args+=(-o "BatchMode=yes")
+  fi
+fi
+if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+  ssh_args+=("${ssh_connection_args[@]}")
+  copy_args+=("${copy_connection_args[@]}")
+  if [[ "$reuse_connection" == "true" ]]; then
+    control_options=(
+      -o "ControlMaster=no"
+      -o "ControlPath=$control_path"
+      -o "ControlPersist=${control_persist}s"
+    )
+    ssh_args+=("${control_options[@]}")
+    copy_args+=("${control_options[@]}")
   fi
 fi
 if [[ "$recursive" == "true" ]]; then
@@ -449,9 +502,11 @@ fi
 stdout_file="$(mktemp)"
 stderr_file="$(mktemp)"
 askpass_file=""
+control_master_failed="false"
 cleanup() {
   rm -f "$stdout_file" "$stderr_file"
   [[ -n "$askpass_file" ]] && rm -f "$askpass_file"
+  return 0
 }
 trap cleanup EXIT
 
@@ -500,6 +555,18 @@ run_copy() {
 printf '%s\n' "$SSH_LINUX_ASKPASS_SECRET"
 EOF
     chmod 700 "$askpass_file"
+    if [[ "$reuse_connection" == "true" ]]; then
+      SSH_LINUX_ASKPASS_SECRET="$password_value" \
+        SSH_ASKPASS="$askpass_file" \
+        SSH_ASKPASS_REQUIRE=force \
+        DISPLAY="${DISPLAY:-codex-ssh-linux}" \
+        ensure_openssh_control_master "$ssh_program" "$control_path" "$control_persist" "$target" "${ssh_connection_args[@]}" >"$stdout_file" 2>"$stderr_file"
+      local master_exit_code=$?
+      if [[ "$master_exit_code" -ne 0 ]]; then
+        control_master_failed="true"
+        return "$master_exit_code"
+      fi
+    fi
     if [[ "$direction" == "upload" ]]; then
       remote_spec="${target}:${target_path}"
       env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" "$copy_program" "${copy_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
@@ -508,6 +575,14 @@ EOF
       env SSH_LINUX_ASKPASS_SECRET="$password_value" SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY="${DISPLAY:-codex-ssh-linux}" "$copy_program" "${copy_args[@]}" "$remote_spec" "$target_path" >"$stdout_file" 2>"$stderr_file"
     fi
   else
+    if [[ "$reuse_connection" == "true" ]]; then
+      ensure_openssh_control_master "$ssh_program" "$control_path" "$control_persist" "$target" "${ssh_connection_args[@]}" >"$stdout_file" 2>"$stderr_file"
+      local master_exit_code=$?
+      if [[ "$master_exit_code" -ne 0 ]]; then
+        control_master_failed="true"
+        return "$master_exit_code"
+      fi
+    fi
     if [[ "$direction" == "upload" ]]; then
       remote_spec="${target}:${target_path}"
       "$copy_program" "${copy_args[@]}" "$source_path" "$remote_spec" >"$stdout_file" 2>"$stderr_file"
@@ -529,6 +604,9 @@ end_ms="$(date +%s%3N 2>/dev/null || date +%s000)"
 duration_ms=$((end_ms - start_ms))
 
 stderr_text="$(cat "$stderr_file" 2>/dev/null || true)"
+if [[ "$reuse_connection" == "true" && -n "$stderr_text" ]]; then
+  stderr_text="$(printf '%s\n' "$stderr_text" | remove_openssh_mux_noise)"
+fi
 stdout_text="$(cat "$stdout_file" 2>/dev/null || true)"
 
 if [[ "$exit_code" -eq 0 ]]; then
@@ -543,6 +621,10 @@ if [[ "$exit_code" -eq 0 ]]; then
   printf 'DIRECTION: %s\n' "$direction"
   printf 'SOURCE: %s\n' "$source_path"
   printf 'TARGET: %s\n' "$target_path"
+  if [[ "$reuse_connection" == "true" ]]; then
+    printf 'CONTROL_PATH: %s\n' "$control_path"
+    printf 'CONTROL_PERSIST: %ss\n' "$control_persist"
+  fi
   if [[ "$key_permission_warning" == "true" ]]; then
     printf 'WARNING: key_permissions_wide\n'
     printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"
@@ -568,6 +650,14 @@ if grep -Eiq 'permission denied|authentication failed' <<<"$stderr_text"; then
   status RISK "$risk"
   status REASON "ssh authentication failed"
   status NEXT "check auth mode, identity, agent, or password environment"
+elif [[ "$control_master_failed" == "true" ]]; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_copy
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "failed to establish SSH control master"
+  status NEXT "inspect STDERR and reuse-connection support"
 elif grep -Eiq 'could not resolve hostname|connection timed out|no route to host|connection refused|name or service not known' <<<"$stderr_text"; then
   status STATUS connect_failed
   status HOST "$target"
@@ -590,6 +680,10 @@ status DURATION_MS "$duration_ms"
 printf 'DIRECTION: %s\n' "$direction"
 printf 'SOURCE: %s\n' "$source_path"
 printf 'TARGET: %s\n' "$target_path"
+if [[ "$reuse_connection" == "true" ]]; then
+  printf 'CONTROL_PATH: %s\n' "$control_path"
+  printf 'CONTROL_PERSIST: %ss\n' "$control_persist"
+fi
 if [[ "$key_permission_warning" == "true" ]]; then
   printf 'WARNING: key_permissions_wide\n'
   printf 'NEXT_KEY_PERMISSIONS: inspect and restrict permissions for %s\n' "$identity_file"

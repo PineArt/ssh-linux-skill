@@ -43,13 +43,15 @@ ARGUMENTS
   --confirmation-state pending|confirmed|none
   --password-env VALUE
   --timeout VALUE
+  --reuse-connection
+  --control-persist VALUE
   --exec-timeout VALUE
   --help | -h
   --help-json
 
 OUTPUT CONTRACT
   Plain-text labels: STATUS, HOST, ACTION, AUTH_MODE, RISK, REASON, NEXT
-  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
+  Additional labels: DURATION_MS, COMMAND_FILE_SIZE, COMMAND_STDIN_SIZE, CONTROL_PATH, CONTROL_PERSIST, WARNING, NEXT_COMMAND_FILE, NEXT_COMMAND_FILE_BOM, NEXT_COMMAND_FILE_PAYLOAD
   Optional blocks: OUTPUT, STDERR
 
 EXAMPLES
@@ -57,17 +59,19 @@ EXAMPLES
   remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh
   cat ./ops/healthcheck.sh | ./scripts/remote-exec.sh --host 10.0.0.8 --user deploy --command-stdin
   remote-exec.sh --host app-prod --command "systemctl restart nginx" --confirmation-state confirmed
+  remote-exec.sh --host app-prod --reuse-connection --control-persist 60 --command "uname -a"
 
 NOTES
   --command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or nested quoting.
   --command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.
   --command-stdin reads local stdin and uses the same remote sh -s transport as --command-file.
+  --reuse-connection enables OpenSSH ControlMaster/ControlPersist for latency reduction without changing per-command output or exit code handling.
 EOF
 }
 
 help_json() {
   cat <<'EOF'
-{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --host VALUE --command-stdin [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Short inline command text to execute remotely. Use --command-file or --command-stdin for multiline scripts, heredocs, or heavily quoted commands."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--command-stdin","required":false,"value":"","description":"Read remote shell script text from local stdin and stream it to remote sh -s after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","cat ./ops/healthcheck.sh | ./scripts/remote-exec.sh --host 10.0.0.8 --user deploy --command-stdin","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed"],"notes":["--command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or nested quoting.","--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.","--command-stdin reads local stdin and uses the same remote sh -s transport as --command-file."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","COMMAND_STDIN_SIZE","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM","NEXT_COMMAND_FILE_PAYLOAD"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
+{"name":"remote-exec.sh","summary":"Execute a command on a Linux host over SSH with auth and risk checks.","usage":["remote-exec.sh --host VALUE --command VALUE [options]","remote-exec.sh --host VALUE --command-file VALUE [options]","remote-exec.sh --host VALUE --command-stdin [options]","remote-exec.sh --help","remote-exec.sh --help-json"],"arguments":[{"name":"--host","required":true,"value":"VALUE","description":"SSH host, alias, or user@host target."},{"name":"--command","required":false,"value":"VALUE","description":"Short inline command text to execute remotely. Use --command-file or --command-stdin for multiline scripts, heredocs, or heavily quoted commands."},{"name":"--command-file","required":false,"value":"VALUE","description":"Path to a local file containing remote shell script text streamed over stdin after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--command-stdin","required":false,"value":"","description":"Read remote shell script text from local stdin and stream it to remote sh -s after CRLF/CR carriage returns and a leading UTF-8 BOM are removed."},{"name":"--user","required":false,"value":"VALUE","description":"Username, used when host is not in user@host form."},{"name":"--port","required":false,"value":"VALUE","description":"SSH port."},{"name":"--auth-mode","required":false,"value":"ssh-alias|identity-file|default-key-discovery|ssh-agent|password","description":"Authentication strategy."},{"name":"--identity-file","required":false,"value":"VALUE","description":"Private key path for identity-file mode."},{"name":"--known-hosts-file","required":false,"value":"VALUE","description":"known_hosts path for host key verification."},{"name":"--remote-dir","required":false,"value":"VALUE","description":"Remote working directory before command execution."},{"name":"--risk","required":false,"value":"auto|low|high","description":"Risk override. auto classifies command content."},{"name":"--confirmation-state","required":false,"value":"pending|confirmed|none","description":"High-risk confirmation gate."},{"name":"--password-env","required":false,"value":"VALUE","description":"Environment variable name for password mode."},{"name":"--timeout","required":false,"value":"VALUE","description":"SSH connect timeout in seconds."},{"name":"--reuse-connection","required":false,"value":"","description":"Reuse an OpenSSH connection via ControlMaster/ControlPersist when supported."},{"name":"--control-persist","required":false,"value":"VALUE","description":"ControlPersist lifetime in seconds when --reuse-connection is enabled. Default 60."},{"name":"--exec-timeout","required":false,"value":"VALUE","description":"Remote command execution timeout in seconds. 0 means no execution timeout."},{"name":"--help|-h","required":false,"value":"","description":"Show human-readable help."},{"name":"--help-json","required":false,"value":"","description":"Show machine-readable JSON help."}],"examples":["remote-exec.sh --host app-prod --command \"uname -a\"","remote-exec.sh --host 10.0.0.8 --user deploy --command-file ./ops/healthcheck.sh","cat ./ops/healthcheck.sh | ./scripts/remote-exec.sh --host 10.0.0.8 --user deploy --command-stdin","remote-exec.sh --host app-prod --command \"systemctl restart nginx\" --confirmation-state confirmed","remote-exec.sh --host app-prod --reuse-connection --control-persist 60 --command \"uname -a\""],"notes":["--command is for simple one-liners. Use --command-file or --command-stdin for scripts with newlines, heredocs, or heavily quoted commands.","--command-file normalizes Windows CRLF line endings and a leading UTF-8 BOM before streaming to remote sh -s.","--command-stdin reads local stdin and uses the same remote sh -s transport as --command-file.","--reuse-connection enables OpenSSH ControlMaster/ControlPersist for latency reduction without changing per-command output or exit code handling."],"output_contract":{"format":"plain-text status labels with optional OUTPUT/STDERR blocks","labels":["STATUS","HOST","ACTION","AUTH_MODE","RISK","REASON","NEXT"],"extra_labels":["DURATION_MS","COMMAND_FILE_SIZE","COMMAND_STDIN_SIZE","CONTROL_PATH","CONTROL_PERSIST","WARNING","NEXT_COMMAND_FILE","NEXT_COMMAND_FILE_BOM","NEXT_COMMAND_FILE_PAYLOAD"],"common_statuses":["ok","invalid_arguments","pending_confirmation","missing_command_file","auth_tool_unavailable","missing_key","key_ambiguous","missing_known_hosts","interactive_password_required","auth_mode_unsupported","auth_failed","connect_failed","exec_timeout","command_failed"]}}
 EOF
 }
 
@@ -110,6 +114,7 @@ write_command_file_normalization_warning() {
     printf 'WARNING: command_file_cr_normalized\n'
     printf 'NEXT_COMMAND_FILE: carriage returns were removed before streaming --command-file content to remote sh -s\n'
   fi
+  return 0
 }
 
 write_command_file_bom_warning() {
@@ -117,6 +122,7 @@ write_command_file_bom_warning() {
     printf 'WARNING: command_file_bom_normalized\n'
     printf 'NEXT_COMMAND_FILE_BOM: leading UTF-8 BOM was removed before streaming --command-file content to remote sh -s\n'
   fi
+  return 0
 }
 
 add_command_file_payload_warning() {
@@ -131,6 +137,7 @@ write_command_file_payload_warnings() {
     printf 'WARNING: %s\n' "${command_file_payload_warning_labels[$index]}"
     printf 'NEXT_COMMAND_FILE_PAYLOAD: %s\n' "${command_file_payload_warning_details[$index]}"
   done
+  return 0
 }
 
 command_file_payload_requires_confirmation() {
@@ -285,6 +292,8 @@ risk="auto"
 confirmation_state="none"
 password_env="SSH_PASSWORD"
 timeout="15"
+reuse_connection="false"
+control_persist="60"
 exec_timeout="0"
 command_file_had_carriage_returns="false"
 command_file_had_utf8_bom="false"
@@ -345,6 +354,21 @@ while [[ $# -gt 0 ]]; do
       ;;
     --timeout)
       timeout="${2:-}"
+      shift 2
+      ;;
+    --reuse-connection)
+      reuse_connection="true"
+      shift
+      ;;
+    --control-persist)
+      control_persist="${2:-}"
+      if [[ ! "$control_persist" =~ ^[0-9]+$ || "$control_persist" -lt 1 ]]; then
+        status STATUS invalid_arguments
+        status ACTION remote_exec
+        status REASON "--control-persist must be a positive integer number of seconds"
+        status NEXT "provide a valid --control-persist value"
+        exit 2
+      fi
       shift 2
       ;;
     --exec-timeout)
@@ -511,6 +535,16 @@ if [[ "$ssh_toolchain_backend" == "none" ]]; then
   exit 4
 fi
 
+if [[ "$reuse_connection" == "true" && "$ssh_toolchain_backend" != "openssh" ]]; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_exec
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "--reuse-connection requires OpenSSH ControlMaster support"
+  status NEXT "use OpenSSH or rerun without --reuse-connection"
+  exit 4
+fi
 case "$auth_mode" in
   ssh-alias)
     ;;
@@ -654,6 +688,11 @@ if [[ -n "$identity_file" && -f "$identity_file" ]]; then
   fi
 fi
 
+control_path=""
+if [[ "$reuse_connection" == "true" ]]; then
+  control_path="$(new_openssh_control_path "$target" "$port" "$identity_file" "$known_hosts_file" "$auth_mode")"
+fi
+
 escaped_dir="${remote_dir//\'/\'\\\'\'}"
 remote_command="$command_text"
 if [[ -n "$remote_dir" ]]; then
@@ -665,29 +704,32 @@ if [[ -n "$command_file" || "$command_stdin" == "true" ]]; then
 fi
 
 ssh_args=()
+ssh_connection_args=()
 ssh_program=""
 if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
   ssh_program="$ssh_tool"
-  ssh_args+=(-o "ConnectTimeout=$timeout")
+  ssh_connection_args+=(-o "ConnectTimeout=$timeout")
 else
   ssh_program="$plink_tool"
   ssh_args+=(-batch)
 fi
 if [[ -n "$port" ]]; then
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
-    ssh_args+=(-p "$port")
+    ssh_connection_args+=(-p "$port")
   else
     ssh_args+=(-P "$port")
   fi
 fi
 if [[ -n "$identity_file" ]]; then
-  ssh_args+=(-i "$identity_file")
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
-    ssh_args+=(-o "IdentitiesOnly=yes")
+    ssh_connection_args+=(-i "$identity_file")
+    ssh_connection_args+=(-o "IdentitiesOnly=yes")
+  else
+    ssh_args+=(-i "$identity_file")
   fi
 fi
 if [[ -n "$known_hosts_file" && "$ssh_toolchain_backend" == "openssh" ]]; then
-  ssh_args+=(-o "UserKnownHostsFile=$known_hosts_file")
+  ssh_connection_args+=(-o "UserKnownHostsFile=$known_hosts_file")
 fi
 if [[ "$auth_mode" == "password" ]]; then
   if [[ "$ssh_toolchain_backend" != "openssh" ]]; then
@@ -700,19 +742,31 @@ if [[ "$auth_mode" == "password" ]]; then
     status NEXT "use OpenSSH or a key-based auth mode"
     exit 8
   fi
-  ssh_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
+  ssh_connection_args+=(-o "PreferredAuthentications=password" -o "PubkeyAuthentication=no")
 else
   if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
-    ssh_args+=(-o "BatchMode=yes")
+    ssh_connection_args+=(-o "BatchMode=yes")
+  fi
+fi
+if [[ "$ssh_toolchain_backend" == "openssh" ]]; then
+  ssh_args+=("${ssh_connection_args[@]}")
+  if [[ "$reuse_connection" == "true" ]]; then
+    ssh_args+=(
+      -o "ControlMaster=no"
+      -o "ControlPath=$control_path"
+      -o "ControlPersist=${control_persist}s"
+    )
   fi
 fi
 
 stdout_file="$(mktemp)"
 stderr_file="$(mktemp)"
 askpass_file=""
+control_master_failed="false"
 cleanup() {
   rm -f "$stdout_file" "$stderr_file"
   [[ -n "$askpass_file" ]] && rm -f "$askpass_file"
+  return 0
 }
 trap cleanup EXIT
 
@@ -747,6 +801,18 @@ run_ssh() {
 printf '%s\n' "$SSH_LINUX_ASKPASS_SECRET"
 EOF
     chmod 700 "$askpass_file"
+    if [[ "$reuse_connection" == "true" ]]; then
+      SSH_LINUX_ASKPASS_SECRET="$password_value" \
+        SSH_ASKPASS="$askpass_file" \
+        SSH_ASKPASS_REQUIRE=force \
+        DISPLAY="${DISPLAY:-codex-ssh-linux}" \
+        ensure_openssh_control_master "$ssh_program" "$control_path" "$control_persist" "$target" "${ssh_connection_args[@]}" >"$stdout_file" 2>"$stderr_file"
+      local master_exit_code=$?
+      if [[ "$master_exit_code" -ne 0 ]]; then
+        control_master_failed="true"
+        return "$master_exit_code"
+      fi
+    fi
     if [[ "$is_stdin_script_mode" == "true" ]]; then
       {
         if [[ -n "$remote_script_prefix" ]]; then
@@ -772,6 +838,14 @@ EOF
         "${timeout_prefix[@]}" "${remote_program[@]}" "$target" "$remote_command" >"$stdout_file" 2>"$stderr_file"
     fi
   else
+    if [[ "$reuse_connection" == "true" ]]; then
+      ensure_openssh_control_master "$ssh_program" "$control_path" "$control_persist" "$target" "${ssh_connection_args[@]}" >"$stdout_file" 2>"$stderr_file"
+      local master_exit_code=$?
+      if [[ "$master_exit_code" -ne 0 ]]; then
+        control_master_failed="true"
+        return "$master_exit_code"
+      fi
+    fi
     if [[ "$is_stdin_script_mode" == "true" ]]; then
       {
         if [[ -n "$remote_script_prefix" ]]; then
@@ -798,6 +872,9 @@ end_ms="$(date +%s%3N 2>/dev/null || date +%s000)"
 duration_ms=$((end_ms - start_ms))
 
 stderr_text="$(cat "$stderr_file" 2>/dev/null || true)"
+if [[ "$reuse_connection" == "true" && -n "$stderr_text" ]]; then
+  stderr_text="$(printf '%s\n' "$stderr_text" | remove_openssh_mux_noise)"
+fi
 stdout_text="$(cat "$stdout_file" 2>/dev/null || true)"
 
 if [[ "$exit_code" -eq 0 ]]; then
@@ -809,6 +886,10 @@ if [[ "$exit_code" -eq 0 ]]; then
   status REASON "remote command executed successfully"
   status NEXT "none"
   status DURATION_MS "$duration_ms"
+  if [[ "$reuse_connection" == "true" ]]; then
+    printf 'CONTROL_PATH: %s\n' "$control_path"
+    printf 'CONTROL_PERSIST: %ss\n' "$control_persist"
+  fi
   if [[ -n "$command_file_size" ]]; then
     printf 'COMMAND_FILE_SIZE: %s\n' "$command_file_size"
   fi
@@ -843,6 +924,14 @@ if [[ "$exit_code" -eq 124 && "$exec_timeout" != "0" ]]; then
   status RISK "$risk"
   status REASON "remote command exceeded exec timeout of $exec_timeout seconds"
   status NEXT "rerun with a larger --exec-timeout or inspect the remote command for prompts or hangs"
+elif [[ "$control_master_failed" == "true" ]]; then
+  status STATUS auth_tool_unavailable
+  status HOST "$target"
+  status ACTION remote_exec
+  status AUTH_MODE "$auth_mode"
+  status RISK "$risk"
+  status REASON "failed to establish SSH control master"
+  status NEXT "inspect STDERR and reuse-connection support"
 elif grep -Eiq 'permission denied|authentication failed' <<<"$stderr_text"; then
   status STATUS auth_failed
   status HOST "$target"
@@ -870,6 +959,10 @@ else
 fi
 
 status DURATION_MS "$duration_ms"
+if [[ "$reuse_connection" == "true" ]]; then
+  printf 'CONTROL_PATH: %s\n' "$control_path"
+  printf 'CONTROL_PERSIST: %ss\n' "$control_persist"
+fi
 if [[ -n "$command_file_size" ]]; then
   printf 'COMMAND_FILE_SIZE: %s\n' "$command_file_size"
 fi
